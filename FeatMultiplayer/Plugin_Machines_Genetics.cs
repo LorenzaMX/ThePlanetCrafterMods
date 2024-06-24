@@ -1,6 +1,5 @@
 ﻿using BepInEx;
 using HarmonyLib;
-using MijuTools;
 using SpaceCraft;
 using System;
 using System.Collections;
@@ -9,6 +8,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -32,7 +32,10 @@ namespace FeatMultiplayer
             UiWindowGenetics __instance,
             WorldObject ___worldObject, 
             Inventory ___inventoryRight,
-            ref bool ___isFinishingSequencing)
+            ref Group ___matchingGroup,
+            DataConfig.CraftableIn ___craftableIdentifier,
+            GroupData ___groupLarvae
+        )
         {
             if (updateMode != MultiplayerMode.SinglePlayer)
             {
@@ -46,7 +49,16 @@ namespace FeatMultiplayer
                     __instance.buttonCancelCraft.SetActive(true);
                     LockInventory(__instance, ___inventoryRight);
                     __instance.sequencingAnimationContainer.SetActive(true);
-                    __instance.groupLoadingDisplayer.SetDisplayLoadingGroup(___worldObject.GetLinkedGroups()[0], true);
+                    ___matchingGroup = ___worldObject.GetLinkedGroups()[0];
+
+                    if (___craftableIdentifier == DataConfig.CraftableIn.CraftGeneticT1)
+                    {
+                        __instance.groupLoadingDisplayer.SetDisplayLoadingGroup(___matchingGroup, true);
+                    }
+                    else if (___craftableIdentifier == DataConfig.CraftableIn.CraftIncubatorT1)
+                    {
+                        __instance.groupLoadingDisplayer.SetDisplayLoadingGroup(GroupsHandler.GetGroupViaId(___groupLarvae.id), true, _showInterogationPoint: true);
+                    }
                 }
                 else
                 {
@@ -126,15 +138,20 @@ namespace FeatMultiplayer
                 LockInventory(__instance, ___inventoryRight);
                 __instance.StartCoroutine(GetUpdateUiCoroutine(__instance));
 
-                Send(new MessageGeneticsAction()
+                var msg = new MessageGeneticsAction()
                 {
                     machineId = ___worldObject.GetId(),
                     groupId = ___matchingGroup.GetId()
-                });
-                Signal();
+                };
+
                 if (updateMode == MultiplayerMode.CoopHost)
                 {
-                    SendWorldObject(___worldObject, false);
+                    SendAllClients(msg, true);
+                    SendWorldObjectToClients(___worldObject, false);
+                }
+                else
+                {
+                    SendHost(msg, true);
                 }
                 return false;
             }
@@ -157,33 +174,26 @@ namespace FeatMultiplayer
         [HarmonyPostfix]
         [HarmonyPatch(typeof(UiWindowGenetics), nameof(UiWindowGenetics.CancelCraftProcess))]
         static void UiWindowGenetics_CancelCraftProcess(
-            bool ___isFinishingSequencing,
             WorldObject ___worldObject)
         {
 
-            if (___isFinishingSequencing)
-            {
-                return;
-            }
             if (updateMode == MultiplayerMode.CoopHost)
             {
-                Send(new MessageGeneticsAction()
+                SendAllClients(new MessageGeneticsAction()
                 {
                     machineId = ___worldObject.GetId(),
                     groupId = ""
-                });
-                Signal();
-                SendWorldObject(___worldObject, false);
+                }, true);
+                SendWorldObjectToClients(___worldObject, false);
             }
             else
             if (updateMode == MultiplayerMode.CoopClient)
             {
-                Send(new MessageGeneticsAction()
+                SendHost(new MessageGeneticsAction()
                 {
                     machineId = ___worldObject.GetId(),
                     groupId = ""
-                });
-                Signal();
+                }, true);
             }
         }
 
@@ -218,7 +228,7 @@ namespace FeatMultiplayer
             else
             if (updateMode == MultiplayerMode.CoopHost)
             {
-                __result = UpdateGrowth(timeRepeat, __instance, ___increaseRate);
+                __result = MachineGrowerIfLinkedGroup_UpdateGrowth_Override(timeRepeat, __instance, ___increaseRate);
                 return false;
             }
             return true;
@@ -231,7 +241,7 @@ namespace FeatMultiplayer
         /// <param name="instance"></param>
         /// <param name="increaseRate"></param>
         /// <returns>The coroutine as IEnumerator</returns>
-        static IEnumerator UpdateGrowth(float timeRepeat, MachineGrowerIfLinkedGroup instance, float increaseRate)
+        static IEnumerator MachineGrowerIfLinkedGroup_UpdateGrowth_Override(float timeRepeat, MachineGrowerIfLinkedGroup instance, float increaseRate)
         {
             for (; ; )
             {
@@ -241,36 +251,20 @@ namespace FeatMultiplayer
                 {
                     if (machineWo.GetGrowth() < 100f)
                     {
-                        if (machineWo.HasLinkedGroups())
+                        var linkedGroups = machineWo.GetLinkedGroups();
+                        if (linkedGroups != null && linkedGroups.Count != 0)
                         {
                             machineWo.SetGrowth(machineWo.GetGrowth() + increaseRate);
-                            machineGrowerIfLinkedGroupSetInteractiveStatus.Invoke(instance, new object[] { true, false });
                             if (machineWo.GetGrowth() >= 100f)
                             {
-                                InventoryAssociated invAssoc = instance.GetComponent<InventoryAssociated>();
-                                if (invAssoc != null)
-                                {
-                                    var ___inventoryRight = invAssoc.GetInventory();
-                                    List<WorldObject> insideWorldObjects = ___inventoryRight.GetInsideWorldObjects();
-
-                                    for (int i = insideWorldObjects.Count - 1; i > -1; i--)
-                                    {
-                                        WorldObject inner = insideWorldObjects[i];
-                                        ___inventoryRight.RemoveItem(inner, true);
-                                    }
-                                    WorldObject productWo = WorldObjectsHandler.CreateNewWorldObject(machineWo.GetLinkedGroups()[0], 0);
-                                    SendWorldObject(productWo, false);
-
-                                    ___inventoryRight.AddItem(productWo);
-                                    ___inventoryRight.RefreshDisplayerContent();
-
-                                    machineWo.SetGrowth(0f);
-                                    machineWo.SetLinkedGroups(null);
-                                }
-
+                                machineWo.SetGrowth(100f);
                                 machineGrowerIfLinkedGroupSetInteractiveStatus.Invoke(instance, new object[] { false, false });
                             } 
-                            SendWorldObject(machineWo, false);
+                            else
+                            {
+                                machineGrowerIfLinkedGroupSetInteractiveStatus.Invoke(instance, new object[] { true, false });
+                            }
+                            SendWorldObjectToClients(machineWo, false);
                         }
                         else
                         {
@@ -284,6 +278,64 @@ namespace FeatMultiplayer
                 }
                 yield return new WaitForSeconds(timeRepeat);
             }
+        }
+
+        /// <summary>
+        /// The vanilla game uses MachineConvertRecipe::CheckIfFullyGrown to periodically
+        /// check if an associated WorldObject is fully grown (WorldObject.GetGrowth() &gt;= 100).
+        /// If so, removes everything from the inventory and adds a produce back into it, resetting
+        /// the growth of the associated WorldObject.
+        /// 
+        /// On the host, we have to intercept the creation of the replacement object and send it to
+        /// the client, along with the info about the growth getting a reset.
+        /// 
+        /// On the client, we don't do anything and let the world object and inventory update messages
+        /// take care of things.
+        /// </summary>
+        /// <param name="___worldObject">The associated grower machine's WorldObject.</param>
+        /// <param name="___inventory">The associated grower machine's inventory.</param>
+        /// <returns>true in singleplayer, false otherwise</returns>
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(MachineConvertRecipe), nameof(MachineConvertRecipe.CheckIfFullyGrown))]
+        static bool MachineConvertRecipe_CheckIfFullyGrown(
+            WorldObject ___worldObject,
+            Inventory ___inventory
+        )
+        {
+            if (updateMode == MultiplayerMode.CoopHost)
+            {
+                if (___worldObject != null && ___worldObject.GetGrowth() >= 100f)
+                {
+                    var linkedGroups = ___worldObject.GetLinkedGroups();
+                    if (linkedGroups != null && linkedGroups.Count != 0)
+                    {
+                        Group group = linkedGroups[0];
+                        GroupItem groupItem = (GroupItem)group;
+                        if (group != null)
+                        {
+                            List<WorldObject> insideWorldObjects = ___inventory.GetInsideWorldObjects();
+                            for (int i = insideWorldObjects.Count - 1; i > -1; i--)
+                            {
+                                WorldObject innerWo = insideWorldObjects[i];
+                                ___inventory.RemoveItem(innerWo, true);
+                            }
+                            WorldObject product = WorldObjectsHandler.CreateNewWorldObject(groupItem, 0);
+                            SendWorldObjectToClients(product, false);
+                            ___inventory.AddItem(product);
+                            ___worldObject.SetGrowth(0f);
+                            ___worldObject.SetLinkedGroups(null);
+                            SendWorldObjectToClients(___worldObject, false);
+                        }
+                    }
+                }
+                return false;
+            }
+            else
+            if (updateMode == MultiplayerMode.CoopClient)
+            {
+                return false;
+            }
+            return true;
         }
 
         static void ReceiveMessageGeneticsAction(MessageGeneticsAction mga)
@@ -307,7 +359,7 @@ namespace FeatMultiplayer
                             inv.RefreshDisplayerContent();
                             if (updateMode == MultiplayerMode.CoopHost)
                             {
-                                SendWorldObject(machineWo, false);
+                                SendWorldObjectToClients(machineWo, false);
                             }
                         }
                         else
@@ -321,7 +373,7 @@ namespace FeatMultiplayer
                                     machineWo.SetLinkedGroups(new List<Group> { gr });
                                     if (updateMode == MultiplayerMode.CoopHost)
                                     {
-                                        SendWorldObject(machineWo, false);
+                                        SendWorldObjectToClients(machineWo, false);
                                     }
 
                                     LockInventory(invAssoc, inv);

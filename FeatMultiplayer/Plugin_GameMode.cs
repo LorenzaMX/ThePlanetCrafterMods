@@ -1,6 +1,5 @@
 ﻿using BepInEx;
 using HarmonyLib;
-using MijuTools;
 using SpaceCraft;
 using System;
 using System.Collections.Generic;
@@ -8,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -21,15 +21,59 @@ namespace FeatMultiplayer
                 return;
             }
 
-            LogInfo("ReceiveMessageGameMode: Switching to game mode " + mgm.modeIndex);
+            LogInfo("ReceiveMessageGameMode: Switching to game mode " + mgm.gameMode);
 
-            var playerStat = new JsonableGameState();
-            playerStat.mode = mgm.modeIndex.ToString();
+            GameSettingsHandler gsh = Managers.GetManager<GameSettingsHandler>();
+            var gameSettings = gsh.GetCurrentGameSettings();
 
-            GameSettingsHandler.SetGameMode(playerStat);
+            gameSettings.gameMode = mgm.gameMode;
+            gameSettings.gameDyingConsequences = mgm.dyingConsequences;
+            gameSettings.unlockedSpaceTrading = mgm.unlockedSpaceTrading;
+            gameSettings.unlockedOreExtrators = mgm.unlockedOreExtractors;
+            gameSettings.worldSeed = mgm.worldSeed;
+
+
+            gameSettings.unlockedTeleporters = mgm.unlockedTeleporters;
+
+            gameSettings.unlockedDrones = mgm.unlockedDrones;
+
+            gameSettings.unlockedAutocrafter = mgm.unlockedAutoCrafter;
+
+            gameSettings.unlockedEverything = mgm.unlockedEverything;
+
+            gameSettings.freeCraft = mgm.freeCraft;
+
+            gameSettings.randomizeMineables = mgm.randomizeMineables;
+
+            gameSettings.modifierTerraformationPace = mgm.terraformationPace;
+
+            gameSettings.modifierPowerConsumption = mgm.powerConsumption;
+
+            gameSettings.modifierGaugeDrain = mgm.gaugeDrain;
+
+            gameSettings.modifierMeteoOccurence = mgm.meteoOccurrence;
 
             // we need to reset the consumption tracker values too
             ResetGaugeConsumptions();
+
+            gsh.ChangeGenerationForGroups();
+            gsh.AddUnlockedGroups();
+
+            WorldRandomizer worldRandomizer = Managers.GetManager<WorldRandomizer>();
+            worldRandomizer.Init();
+
+            if (mgm.randomizeMineables)
+            {
+                foreach (var wos in FindObjectsByType<WorldObjectFromScene>(FindObjectsSortMode.None))
+                {
+                    worldRandomizer.ReplaceWorldObjectFromScene(wos);
+                }
+
+                foreach (var ov in FindObjectsByType<MachineGenerationGroupVein>(FindObjectsSortMode.None))
+                {
+                    worldRandomizer.ReplaceOreVein(ov);
+                }
+            }
         }
 
         static void ResetGaugeConsumptions()
@@ -57,23 +101,22 @@ namespace FeatMultiplayer
         [HarmonyPatch(typeof(DyingConsequencesHandler), nameof(DyingConsequencesHandler.HandleDyingConsequences))]
         static bool DyingConsequencesHandler_HandleDyingConsequences(PlayerMainController _playerMainController)
         {
-            DataConfig.GameSettingMode gameSettingMode = GameSettingsHandler.GetGameMode();
+            var dyingConsequnce = Managers.GetManager<GameSettingsHandler>().GetCurrentGameSettings().GetDyingConsequences();
             if (updateMode == MultiplayerMode.CoopClient)
             {
-                if (gameSettingMode != DataConfig.GameSettingMode.Chill)
+                if (dyingConsequnce != DataConfig.GameSettingDyingConsequences.NoConsequences)
                 {
-                    Send(new MessageDeath()
+                    SendHost(new MessageDeath()
                     {
                         position = _playerMainController.transform.position
-                    });
-                    Signal();
+                    }, true);
 
-                    if (gameSettingMode == DataConfig.GameSettingMode.Standard)
+                    if (dyingConsequnce == DataConfig.GameSettingDyingConsequences.DropSomeItems)
                     {
                         Managers.GetManager<BaseHudHandler>().DisplayCursorText("Dying_Info_Drop_Some_Items", 6f, "");
                     }
                     else
-                    if (gameSettingMode == DataConfig.GameSettingMode.Intense)
+                    if (dyingConsequnce == DataConfig.GameSettingDyingConsequences.DropAllItems)
                     {
                         Managers.GetManager<BaseHudHandler>().DisplayCursorText("Dying_Info_Lost_All_Items", 6f, "");
                     }
@@ -82,7 +125,7 @@ namespace FeatMultiplayer
                 }
             }
             else
-            if (updateMode == MultiplayerMode.CoopHost && gameSettingMode == DataConfig.GameSettingMode.Hardcore)
+            if (updateMode == MultiplayerMode.CoopHost && dyingConsequnce == DataConfig.GameSettingDyingConsequences.DeleteSaveFile)
             {
                 UiWindowPause_OnQuit();
             }
@@ -114,7 +157,7 @@ namespace FeatMultiplayer
             else
             {
 
-                switch (GameSettingsHandler.GetGameMode())
+                switch (Managers.GetManager<GameSettingsHandler>().GetCurrentGameSettings().GetGameMode())
                 {
                     case DataConfig.GameSettingMode.Chill:
                         {
@@ -124,7 +167,7 @@ namespace FeatMultiplayer
                     case DataConfig.GameSettingMode.Standard:
                         {
                             LogInfo("ReceiveMessageDeath: Standard @ " + mdt.position);
-                            var inv = InventoriesHandler.GetInventoryById(shadowInventoryId);
+                            var inv = mdt.sender.shadowBackpack;
                             var list = inv.GetInsideWorldObjects();
 
                             var dropProbability = 50;
@@ -140,32 +183,36 @@ namespace FeatMultiplayer
                                     var item = list[i];
                                     if (dropAll || dropProbability > UnityEngine.Random.Range(0, 100))
                                     {
-                                        if (dinv.AddItem(item))
+                                        var gr = item.GetGroup();
+                                        if (!(gr is GroupItem) || !((GroupItem)gr).GetCantBeDestroyed())
                                         {
-                                            inv.RemoveItem(item, false);
+                                            if (dinv.AddItem(item))
+                                            {
+                                                inv.RemoveItem(item, false);
+                                            }
                                         }
                                     }
                                 }
 
                                 // make the chest disappear upon emptying it
                                 mdt.chestId = chestId;
-                                Send(mdt);
-                                Signal();
+                                mdt.sender.Send(mdt);
+                                mdt.sender.Signal();
                             }
                             break;
                         }
                     case DataConfig.GameSettingMode.Intense:
                         {
                             LogInfo("ReceiveMessageDeath: Intense @ " + mdt.position);
-                            DeathClearInventory(shadowInventoryId);
+                            DeathClearInventoryExcept(mdt.sender.shadowBackpack);
 
                             break;
                         }
                     case DataConfig.GameSettingMode.Hardcore:
                         {
                             LogInfo("ReceiveMessageDeath: Hardcode @ " + mdt.position);
-                            DeathClearInventory(shadowInventoryId);
-                            DeathClearInventory(shadowEquipmentId);
+                            DeathClearInventoryExcept(mdt.sender.shadowBackpack);
+                            DeathClearInventory(mdt.sender.shadowEquipment);
 
                             break;
                         }
@@ -173,13 +220,26 @@ namespace FeatMultiplayer
             }
         }
 
-        static void DeathClearInventory(int iid)
+        static void DeathClearInventory(Inventory inv)
         {
-            var inv = InventoriesHandler.GetInventoryById(iid);
             var list = inv.GetInsideWorldObjects();
             for (int i = list.Count - 1; i >= 0; i--)
             {
                 inv.RemoveItem(list[i], true);
+            }
+        }
+
+        static void DeathClearInventoryExcept(Inventory inv)
+        {
+            var list = inv.GetInsideWorldObjects();
+            for (int i = list.Count - 1; i >= 0; i--)
+            {
+                var item = list[i];
+                var gr = item.GetGroup();
+                if (!(gr is GroupItem) || !((GroupItem)gr).GetCantBeDestroyed())
+                {
+                    inv.RemoveItem(list[i], true);
+                }
             }
         }
 
@@ -227,15 +287,29 @@ namespace FeatMultiplayer
             ddc.inventory = inv;
             ddc.BeginTrack();
 
-            SendWorldObject(wo, false);
-            Send(new MessageInventorySize()
+            SendWorldObjectToClients(wo, false);
+            SendAllClients(new MessageInventorySize()
             {
                 inventoryId = inv.GetId(),
                 size = inv.GetSize()
-            });
-            Signal();
+            }, true);
             chestId = wo.GetId();
             return inv;
+        }
+
+        /// <summary>
+        /// Called when the conditions for achievements are met.
+        /// </summary>
+        /// <returns>True in case in single player or achievements in MP are enabled</returns>
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AchievementsHandler), nameof(AchievementsHandler.UnlockAchievemement))]
+        static bool AchievementsHandler_UnlockAchievement()
+        {
+            if (updateMode != MultiplayerMode.SinglePlayer && !achievements.Value)
+            {
+                return false;
+            }
+            return true;
         }
     }
 }

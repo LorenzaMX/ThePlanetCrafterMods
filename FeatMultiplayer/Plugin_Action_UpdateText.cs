@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using TMPro;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -36,8 +37,14 @@ namespace FeatMultiplayer
                     id = wo.GetId(),
                     text = ___inputField.text
                 };
-                Send(mut);
-                Signal();
+                if (updateMode == MultiplayerMode.CoopHost)
+                {
+                    SendAllClients(mut, true);
+                }
+                else
+                {
+                    SendHost(mut, true);
+                }
                 // Do not change the client but wait for the server update
                 return updateMode != MultiplayerMode.CoopClient;
             }
@@ -59,8 +66,7 @@ namespace FeatMultiplayer
                         // Signal back the client immediately
                         if (updateMode == MultiplayerMode.CoopHost)
                         {
-                            Send(mut);
-                            Signal();
+                            SendAllClients(mut, true);
                         }
                     }
                 }

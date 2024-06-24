@@ -1,7 +1,6 @@
 ﻿using BepInEx;
 using BepInEx.Bootstrap;
 using HarmonyLib;
-using MijuTools;
 using SpaceCraft;
 using System;
 using System.Collections;
@@ -23,6 +22,39 @@ namespace FeatMultiplayer
         /// </summary>
         static bool modMachineRemoteDeposit;
 
+        static string GenerateOre(
+            List<GroupData> ___groupDatas,
+            bool ___setGroupsDataViaLinkedGroup,
+            WorldObject ___worldObject,
+            List<GroupData> ___groupDatasTerraStage,
+            WorldUnitsHandler ___worldUnitsHandler,
+            TerraformStage ___terraStage)
+        {
+            // Since 0.6.001
+            if (___setGroupsDataViaLinkedGroup)
+            {
+                var linkedGroups = ___worldObject.GetLinkedGroups();
+                if (linkedGroups != null && linkedGroups.Count != 0)
+                {
+                    return linkedGroups[UnityEngine.Random.Range(0, linkedGroups.Count)].id;
+                }
+                return null;
+            }
+            if (___groupDatas.Count != 0)
+            {
+                // Since 0.7.001
+                var groupDatasCopy = new List<GroupData>(___groupDatas);
+                if (___groupDatasTerraStage.Count != 0
+                    && ___worldUnitsHandler.IsWorldValuesAreBetweenStages(___terraStage, null))
+                {
+                    groupDatasCopy.AddRange(___groupDatasTerraStage);
+                }
+
+                return groupDatasCopy[UnityEngine.Random.Range(0, groupDatasCopy.Count)].id;
+            }
+            return null;
+        }
+
         /// <summary>
         /// The vanilla game's machines, such as the miners, the water collectors and the gas
         /// extractors use MachineGenerator::GenerateAnObject to generate an object and add it
@@ -41,7 +73,14 @@ namespace FeatMultiplayer
         /// <returns>True in singleplayer and if the mod is installed so it can run, false otherwise.</returns>
         [HarmonyPrefix]
         [HarmonyPatch(typeof(MachineGenerator), "GenerateAnObject")]
-        static bool MachineGenerator_GenerateAnObject(List<GroupData> ___groupDatas, Inventory ___inventory)
+        static bool MachineGenerator_GenerateAnObject(
+            List<GroupData> ___groupDatas, 
+            Inventory ___inventory,
+            bool ___setGroupsDataViaLinkedGroup,
+            WorldObject ___worldObject,
+            List<GroupData> ___groupDatasTerraStage,
+            WorldUnitsHandler ___worldUnitsHandler,
+            TerraformStage ___terraStage)
         {
             if (!modMachineRemoteDeposit)
             {
@@ -54,9 +93,13 @@ namespace FeatMultiplayer
                         LogInfo("MachineGenerator_GenerateAnObject:   " + gr.id);
                     }
                     */
-                    string oreId = ___groupDatas[UnityEngine.Random.Range(0, ___groupDatas.Count)].id;
-                    LogInfo("MachineGenerator_GenerateAnObject: Generated " + oreId);
-                    GenerateAnObjectAndDepositInto(___inventory, oreId);
+                    string oreId = GenerateOre(___groupDatas, ___setGroupsDataViaLinkedGroup, ___worldObject,
+                    ___groupDatasTerraStage, ___worldUnitsHandler, ___terraStage);
+                    if (oreId != null)
+                    {
+                        LogInfo("MachineGenerator_GenerateAnObject: Generated " + oreId);
+                        GenerateAnObjectAndDepositInto(___inventory, oreId);
+                    }
                     return false;
                 }
                 else
@@ -84,35 +127,7 @@ namespace FeatMultiplayer
             }
             if (updateMode == MultiplayerMode.CoopHost)
             {
-                var wo = WorldObjectsHandler.CreateNewWorldObject(GroupsHandler.GetGroupViaId(oreId));
-                suppressInventoryChange = true;
-                bool added;
-                try
-                {
-                    added = inv.AddItem(wo);
-                }
-                finally
-                {
-                    suppressInventoryChange = false;
-                }
-
-                if (added)
-                {
-                    // We need to send the object first, then send the instruction that it has been
-                    // Added to the target inventory.
-                    SendWorldObject(wo, false);
-                    Send(new MessageInventoryAdded()
-                    {
-                        inventoryId = inv.GetId(),
-                        itemId = wo.GetId(),
-                        groupId = oreId
-                    });
-                    Signal();
-                }
-                else
-                {
-                    WorldObjectsHandler.DestroyWorldObject(wo);
-                }
+                TryCreateInInventoryAndNotify(GroupsHandler.GetGroupViaId(oreId), inv, null, out _);
                 return true;
             }
             return false;

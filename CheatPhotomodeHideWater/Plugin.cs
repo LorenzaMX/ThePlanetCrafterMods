@@ -1,35 +1,48 @@
-﻿using BepInEx;
+﻿// Copyright (c) 2022-2024, David Karnok & Contributors
+// Licensed under the Apache License, Version 2.0
+
+using BepInEx;
 using SpaceCraft;
 using HarmonyLib;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
-using MijuTools;
 
-namespace UIPhotomodeHideWater
+namespace CheatPhotomodeHideWater
 {
-    [BepInPlugin("akarnokd.theplanetcraftermods.uiphotomodehidewater", "(Cheat) Hide Water in Photomode", "1.0.0.1")]
+    [BepInPlugin("akarnokd.theplanetcraftermods.uiphotomodehidewater", "(Cheat) Hide Water in Photomode", PluginInfo.PLUGIN_VERSION)]
     public class Plugin : BaseUnityPlugin
     {
 
         private void Awake()
         {
+            LibCommon.BepInExLoggerFix.ApplyFix();
+
             // Plugin startup logic
             Logger.LogInfo($"Plugin is loaded!");
 
+            LibCommon.HarmonyIntegrityCheck.Check(typeof(Plugin));
             Harmony.CreateAndPatchAll(typeof(Plugin));
         }
 
         [HarmonyPostfix]
-        [HarmonyPatch(typeof(LiveDevTools), nameof(LiveDevTools.ToggleUi))]
-        static void LiveDevTools_ToggleUi(List<GameObject> ___handObjectsToHide)
+        [HarmonyPatch(typeof(VisualsToggler), nameof(VisualsToggler.ToggleUi))]
+        static void VisualsToggler_ToggleUi(List<GameObject> ___uisToHide)
         {
-            bool active = !___handObjectsToHide[0].activeSelf;
+            bool active = ___uisToHide[0].activeSelf;
             if (Keyboard.current[Key.LeftShift].isPressed)
             {
-                foreach (GameObject gameObject2 in Managers.GetManager<WaterHandler>().waterVolumes)
+                foreach (GameObject gameObject2 in Managers.GetManager<WaterHandler>().GetAllWaterVolumes())
                 {
                     gameObject2.SetActive(active);
+                }
+
+                foreach (GameObject gameObject2 in FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+                {
+                    if (gameObject2.name == "Water")
+                    {
+                        gameObject2.SetActive(active);
+                    }
                 }
             }
         }

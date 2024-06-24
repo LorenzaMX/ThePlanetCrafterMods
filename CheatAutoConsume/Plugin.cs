@@ -1,28 +1,33 @@
-﻿using BepInEx;
-using MijuTools;
+﻿// Copyright (c) 2022-2024, David Karnok & Contributors
+// Licensed under the Apache License, Version 2.0
+
+using BepInEx;
 using SpaceCraft;
 using HarmonyLib;
 using BepInEx.Configuration;
 
 namespace CheatAutoConsume
 {
-    [BepInPlugin("akarnokd.theplanetcraftermods.cheatautoconsume", "(Cheat) Auto Consume Oxygen-Water-Food", "1.0.0.2")]
+    [BepInPlugin("akarnokd.theplanetcraftermods.cheatautoconsume", "(Cheat) Auto Consume Oxygen-Water-Food", PluginInfo.PLUGIN_VERSION)]
     public class Plugin : BaseUnityPlugin
     {
 
-        private static ConfigEntry<int> threshold;
+        static ConfigEntry<int> threshold;
 
         static bool oxygenWarning;
         static bool waterWarning;
         static bool foodWarning;
 
-        private void Awake()
+        public void Awake()
         {
+            LibCommon.BepInExLoggerFix.ApplyFix();
+
             // Plugin startup logic
             Logger.LogInfo($"Plugin is loaded!");
 
             threshold = Config.Bind("General", "Threshold", 9, "The percentage for which below food/water/oxygen is consumed.");
 
+            LibCommon.HarmonyIntegrityCheck.Check(typeof(Plugin));
             Harmony.CreateAndPatchAll(typeof(Plugin));
         }
 
@@ -33,17 +38,24 @@ namespace CheatAutoConsume
             PlayerGaugesHandler gh = activePlayerController.GetGaugesHandler();
             foreach (WorldObject _worldObject in inv.GetInsideWorldObjects())
             {
-                if (_worldObject.GetGroup() is GroupItem)
+                if (_worldObject.GetGroup() is GroupItem groupItem)
                 {
-                    GroupItem groupItem = (GroupItem)_worldObject.GetGroup();
                     int groupValue = groupItem.GetGroupValue();
                     if (groupItem.GetUsableType() == type)
                     {
                         if ((type == DataConfig.UsableType.Eatable && gh.Eat(groupValue))
                                 || (type == DataConfig.UsableType.Breathable && gh.Breath(groupValue))
                                 || (type == DataConfig.UsableType.Drinkable && gh.Drink(groupValue))
-                                ) {
-                            inv.RemoveItem(_worldObject, true);
+                                )
+                        {
+
+                            if (groupItem.GetEffectOnPlayer() != null)
+                            {
+                                activePlayerController.GetPlayerEffects().ActivateEffect(groupItem.GetEffectOnPlayer());
+                            }
+
+                            InventoriesHandler.Instance.RemoveItemFromInventory(_worldObject, inv, true, null);
+
                             return true;
                         }
                     }

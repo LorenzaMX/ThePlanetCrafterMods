@@ -4,9 +4,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessageDeconstruct : MessageStringProvider
+    internal class MessageDeconstruct : MessageBase
     {
         internal int id;
         internal string groupId;
@@ -39,7 +39,7 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
             StringBuilder sb = new StringBuilder();
             sb.Append("Deconstruct|").Append(id).Append('|').Append(groupId).Append('|');

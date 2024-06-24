@@ -1,6 +1,5 @@
 ﻿using BepInEx;
 using HarmonyLib;
-using MijuTools;
 using SpaceCraft;
 using System;
 using System.Collections.Generic;
@@ -28,14 +27,6 @@ namespace FeatMultiplayer
         static readonly Dictionary<string, int> countByGroupId = new();
 
         /// <summary>
-        /// The map from WorldObjects to GameObjects.
-        /// Obtained via reflection from the private field <code>WorldObjectsHandler.worldObjects</code>.
-        /// <code>WorldObjectsHandler.GetGameObjectViaWorldObject</code> crashes if
-        /// the WorldObject is not in the map. We need the dictionary to run TryGetValue/ContainsKey on it.
-        /// </summary>
-        static Dictionary<WorldObject, GameObject> gameObjectByWorldObject;
-
-        /// <summary>
         /// Maps GameObjects having the <see cref="WorldObjectFromScene"/> 
         /// or <see cref="InventoryFromScene"/> component
         /// to their unique identifier so they can be located before their
@@ -51,7 +42,8 @@ namespace FeatMultiplayer
         /// <returns>true if found</returns>
         internal static bool TryGetGameObject(WorldObject wo, out GameObject go)
         {
-            if (gameObjectByWorldObject.TryGetValue(wo, out go))
+            go = wo.GetGameObject();
+            if (go != null)
             {
                 return true;
             }
@@ -65,7 +57,9 @@ namespace FeatMultiplayer
         /// <returns>True if successful.</returns>
         internal static bool TryRemoveGameObject(WorldObject wo)
         {
-            return gameObjectByWorldObject.Remove(wo);
+            var go = wo.GetGameObject();
+            wo.SetGameObject(null);
+            return go != null;
         }
 
         /// <summary>
@@ -178,6 +172,7 @@ namespace FeatMultiplayer
         {
             if (updateMode == MultiplayerMode.CoopClient)
             {
+                //LogWarning(Environment.StackTrace);
                 for (int i = 0; i < 50; i++)
                 {
                     int randomId = 300000000 + UnityEngine.Random.Range(1000000, 9999999);
@@ -297,10 +292,12 @@ namespace FeatMultiplayer
                 int iid = inv.GetId();
                 if (iid == _inventoryId)
                 {
-                    WorldObjectsHandler.DestroyWorldObjects(inv.GetInsideWorldObjects());
-
                     ___allWorldInventories.RemoveAt(i);
                     inventoryById.Remove(iid);
+
+                    WorldObjectsHandler.DestroyWorldObjects(inv.GetInsideWorldObjects());
+
+                    Managers.GetManager<LogisticManager>().RemoveInventoryFromLogistics(inv);
                     break;
                 }
             }

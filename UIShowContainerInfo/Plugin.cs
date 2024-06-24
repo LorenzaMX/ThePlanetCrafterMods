@@ -1,7 +1,9 @@
-﻿using BepInEx;
+﻿// Copyright (c) 2022-2024, David Karnok & Contributors
+// Licensed under the Apache License, Version 2.0
+
+using BepInEx;
 using SpaceCraft;
 using HarmonyLib;
-using UnityEngine;
 using System;
 using System.Collections.Generic;
 using BepInEx.Bootstrap;
@@ -10,7 +12,7 @@ using BepInEx.Configuration;
 
 namespace UIShowContainerInfo
 {
-    [BepInPlugin("akarnokd.theplanetcraftermods.uishowcontainerinfo", "(UI) Show Container Content Info", "1.0.0.2")]
+    [BepInPlugin("akarnokd.theplanetcraftermods.uishowcontainerinfo", "(UI) Show Container Content Info", PluginInfo.PLUGIN_VERSION)]
     [BepInDependency(modInventoryStackingGuid, BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
@@ -18,82 +20,132 @@ namespace UIShowContainerInfo
         /// <summary>
         /// If the CheatInventoryStacking is installed, consider the stack counts when displaying information.
         /// </summary>
-        static Func<List<WorldObject>, int> getStackCount;
+        static Func<IEnumerable<WorldObject>, int> getStackCount;
 
-        static ConfigEntry<int> stackSize;
+        static ConfigEntry<int> stackSizeConfig;
+        static Func<int, bool> apiCanStack;
+
+        static MethodInfo mActionableHandleHoverMaterial;
+        static AccessTools.FieldRef<Actionnable, bool> fActionableHovering;
 
         private void Awake()
         {
+            LibCommon.BepInExLoggerFix.ApplyFix();
+            
             // Plugin startup logic
             Logger.LogInfo($"Plugin is loaded!");
 
             if (Chainloader.PluginInfos.TryGetValue(modInventoryStackingGuid, out BepInEx.PluginInfo pi))
             {
-                MethodInfo mi = AccessTools.Method(pi.Instance.GetType(), "GetStackCount", new Type[] { typeof(List<WorldObject>) });
-                getStackCount = AccessTools.MethodDelegate<Func<List<WorldObject>, int>>(mi, null);
+                Logger.LogInfo("Mod " + modInventoryStackingGuid + " found, considering stacking in various inventories");
 
-                stackSize = (ConfigEntry<int>)AccessTools.Field(pi.Instance.GetType(), "stackSize").GetValue(null);
+                Type modType = pi.Instance.GetType();
+
+                getStackCount = (Func<IEnumerable<WorldObject>, int>)AccessTools.Field(modType, "apiGetStackCount").GetValue(null);
+                stackSizeConfig = (ConfigEntry<int>)AccessTools.Field(modType, "stackSize").GetValue(null);
+                apiCanStack = (Func<int, bool>)AccessTools.Field(modType, "apiCanStack").GetValue(null);
+            }
+            else
+            {
+                Logger.LogInfo("Mod " + modInventoryStackingGuid + " not found");
             }
 
+            mActionableHandleHoverMaterial = AccessTools.Method(typeof(Actionnable), "HandleHoverMaterial", [typeof(bool)]);
+            fActionableHovering = AccessTools.FieldRefAccess<Actionnable, bool>("_hovering");
+
+            LibCommon.HarmonyIntegrityCheck.Check(typeof(Plugin));
             Harmony.CreateAndPatchAll(typeof(Plugin));
         }
 
         [HarmonyPrefix]
         [HarmonyPatch(typeof(ActionOpenable), nameof(ActionOpenable.OnHover))]
-        static bool ActionOpenable_OnHover(ActionOpenable __instance, BaseHudHandler ___hudHandler)
+        static bool ActionOpenable_OnHover(
+            ActionOpenable __instance, 
+            BaseHudHandler ____hudHandler)
         {
-            string custom = "";
-            WorldObjectText woText = __instance.GetComponent<WorldObjectText>();
-            if (woText != null && woText.GetTextIsSet())
+            InventoryAssociated inventoryAssoc = __instance.GetComponentInParent<InventoryAssociated>();
+            if (inventoryAssoc == null)
             {
-                custom = " \"" + woText.GetText() + "\" ";
+                inventoryAssoc = __instance.GetComponentInChildren<InventoryAssociated>();
             }
-            string text = Readable.GetGroupName(Components.GetComponentOnGameObjectOrInParent<WorldObjectAssociated>(__instance.gameObject).GetWorldObject().GetGroup());
-            InventoryAssociated componentOnGameObjectOrInParent = Components.GetComponentOnGameObjectOrInParent<InventoryAssociated>(__instance.gameObject);
-            if (componentOnGameObjectOrInParent != null)
+            if (inventoryAssoc != null)
             {
-                Inventory inventory = componentOnGameObjectOrInParent.GetInventory();
-                List<WorldObject> inv = inventory.GetInsideWorldObjects();
-                int count = inv.Count;
-                int size = inventory.GetSize();
-
-                if (getStackCount != null)
+                inventoryAssoc.GetInventory(inventory =>
                 {
-                    int stacks = getStackCount(inv);
-                    int slotSize = stackSize.Value;
-                    text += custom + "  [  " + stacks + "  /  " + size + "  --  (  " + count + "  /  " + (size * slotSize) + "  )]  ";
-                    if (count >= size * slotSize)
+                    string custom = "";
+                    WorldObjectText woText = __instance.GetComponent<WorldObjectText>();
+                    if (woText != null && woText.GetTextIsSet())
                     {
-                        text += "  --- FULL ---  ";
+                        custom = " \"" + woText.GetText() + "\" ";
                     }
-                }
-                else
-                {
-                    text += custom + "  [  " + count + "  /  " + size + "  ]  ";
-                    if (count >= size)
+
+                    var containerGroup = default(Group);
+
+                    var woa = __instance.GetComponentInParent<WorldObjectAssociated>()
+                                ?? __instance.GetComponentInChildren<WorldObjectAssociated>();
+                    if (woa != null && woa.GetWorldObject() != null)
                     {
-                        text += "  --- FULL ---  ";
+                        containerGroup = woa.GetWorldObject().GetGroup();
                     }
-                }
+                    else if (__instance.TryGetComponent<ConstructibleProxy>(out var cp))
+                    {
+                        containerGroup = cp.GetGroup();
+                    }
 
-                if (count > 0)
-                {
-                    text += Readable.GetGroupName(inventory.GetInsideWorldObjects()[0].GetGroup());
-                }
+                    string text = containerGroup != null ? Readable.GetGroupName(containerGroup) : "";
+
+                    var inv = inventory.GetInsideWorldObjects();
+                    int count = inv.Count;
+                    int size = inventory.GetSize();
+
+                    if (getStackCount != null && apiCanStack(inventory.GetId()))
+                    {
+                        int stacks = getStackCount(inv);
+                        int slotSize = stackSizeConfig.Value;
+                        text += custom + "  [  " + stacks + "  /  " + size + "  --  (  " + count + "  /  " + (size * slotSize) + "  )]  ";
+                        if (count >= size * slotSize)
+                        {
+                            text += "  --- FULL ---  ";
+                        }
+                    }
+                    else
+                    {
+                        text += custom + "  [  " + count + "  /  " + size + "  ]  ";
+                        if (count >= size)
+                        {
+                            text += "  --- FULL ---  ";
+                        }
+                    }
+
+                    if (count > 0)
+                    {
+                        text += Readable.GetGroupName(inv[0].GetGroup());
+                    }
+
+
+                    GamepadConfig.Instance.SetGamepadHintButtonVisible("Open", visible: true);
+                    if (!GamepadConfig.Instance.GetIsUsingController())
+                    {
+                        ____hudHandler.DisplayCursorText("UI_Open", 0f, text);
+                    }
+
+
+                    // base.OnHover() => Actionable.OnHover()
+                    if (__instance.TryGetComponent<ActionnableInteractive>(out var ai))
+                    {
+                        ai.OnHoverInteractive();
+                    }
+                    // this.HandleHoverMaterial(true, null);
+                    
+                    mActionableHandleHoverMaterial.Invoke(__instance, [true]);
+
+                    // this._hovering = true;
+                    fActionableHovering.Invoke(__instance) = true;
+                });
+                return false;
             }
-            ___hudHandler.DisplayCursorText("UI_Open", 0f, text);
 
-            // base.OnHover() => Actionable.OnHover()
-            ActionnableInteractive ai = __instance.GetComponent<ActionnableInteractive>();
-            if (ai != null)
-            {
-                ai.OnHoverInteractive();
-            }
-            // this.HandleHoverMaterial(true, null);
-            System.Reflection.MethodInfo mi = AccessTools.Method(typeof(Actionnable), "HandleHoverMaterial", new System.Type[] { typeof(bool), typeof(GameObject) });
-            mi.Invoke(__instance, new object[] { true, null });
-
-            return false;
+            return true;
         }
     }
 }

@@ -1,34 +1,74 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <PackageReference Include="BepInEx.Analyzers" Version="1.*" PrivateAssets="all" />
+    <PackageReference Include="BepInEx.Core" Version="5.*" />
+    <PackageReference Include="BepInEx.PluginInfoProps" Version="1.*" />
+    <PackageReference Include="UnityEngine.Modules" Version="2023.2.19" IncludeAssets="compile" />
+  </ItemGroup>
+  
+  <ItemGroup Condition="'$(TargetFramework.TrimEnd(`0123456789`))' == 'net'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.2" PrivateAssets="all" />
+  </ItemGroup>
 
 	<!-- Steam Deployments -->
 	<PropertyGroup Condition="Exists('c:\Program Files (x86)\Steam\steamapps\common\The Planet Crafter')">
 		<GameDir>c:\Program Files (x86)\Steam\steamapps\common\The Planet Crafter\</GameDir>
-		<GameManaged>$(GameDir)Planet Crafter_Data\Managed\</GameManaged>
+		<GameManaged>$(GameDir)\Planet Crafter_Data\Managed\</GameManaged>
 		<PluginsFolder>$(GameDir)\BepInEx\plugins</PluginsFolder>
 	</PropertyGroup>
 	<PropertyGroup Condition="Exists('e:\Steam\steamapps\common\The Planet Crafter')">
 		<GameDir>e:\Steam\steamapps\common\The Planet Crafter\</GameDir>
-		<GameManaged>$(GameDir)Planet Crafter_Data\Managed\</GameManaged>
+		<GameManaged>$(GameDir)\Planet Crafter_Data\Managed\</GameManaged>
 		<PluginsFolder>$(GameDir)\BepInEx\plugins</PluginsFolder>
-	</PropertyGroup>
-
-	<!-- Standalone Deployments -->
-	<PropertyGroup Condition="Exists('c:\Games\The Planet Crafter')">
-		<GameDir2>c:\Games\The Planet Crafter</GameDir2>
-		<GameManaged2>$(GameDir2)Planet Crafter_Data\Managed\</GameManaged2>
-		<PluginsFolder2>$(GameDir2)\BepInEx\plugins</PluginsFolder2>
-	</PropertyGroup>
-
-	<PropertyGroup Condition="Exists('e:\Games\The Planet Crafter')">
-		<GameDir2>e:\Games\The Planet Crafter</GameDir2>
-		<GameManaged2>$(GameDir2)Planet Crafter_Data\Managed\</GameManaged2>
-		<PluginsFolder2>$(GameDir2)\BepInEx\plugins</PluginsFolder2>
 	</PropertyGroup>
 	
 	<!-- Deployment target directories -->
 	<PropertyGroup>
 		<Destination1>$(PluginsFolder)\akarnokd - $(Description)</Destination1>
-		<Destination2>$(PluginsFolder2)\akarnokd - $(Description)</Destination2>
 	</PropertyGroup>
+
+	<ItemGroup>
+		<Reference Include="Assembly-CSharp">
+			<SpecificVersion>False</SpecificVersion>
+			<HintPath>$(GameManaged)\Assembly-CSharp.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="Unity.InputSystem">
+			<SpecificVersion>False</SpecificVersion>
+			<HintPath>$(GameManaged)unity.inputsystem.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="Unity.TextMeshPro">
+			<SpecificVersion>False</SpecificVersion>
+			<HintPath>$(GameManaged)unity.textmeshpro.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="UnityEngine.UI">
+			<SpecificVersion>False</SpecificVersion>
+			<HintPath>$(GameManaged)unityengine.ui.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="Unity.HSVPicker">
+			<SpecificVersion>False</SpecificVersion>
+			<HintPath>$(GameManaged)HSVPicker.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="Unity.NetCode">
+			<SpecificVersion>False</SpecificVersion>
+			<HintPath>$(GameManaged)unity.netcode.runtime.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="Unity.InputSystem">
+			<SpecificVersion>False</SpecificVersion>
+			<HintPath>$(GameManaged)unity.inputsystem.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+	</ItemGroup>
+
+	<!--
+	<ItemGroup Condition="'$(ProjectName)' != 'LibCommon'">
+		<Compile Include="..\LibCommon\UnityExt.cs" Link="UnityExt.cs" />
+	</ItemGroup>
+	-->
 
 </Project>

@@ -4,9 +4,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessagePanelChanged : MessageStringProvider
+    internal class MessagePanelChanged : MessageBase
     {
         internal int itemId;
         internal int panelId;
@@ -38,7 +38,7 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
             return "PanelChanged|" + itemId + "|" + panelId + "|" + panelType + "|" + panelGroupId + "\n";
         }

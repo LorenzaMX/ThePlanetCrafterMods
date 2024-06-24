@@ -7,15 +7,21 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
     public partial class Plugin : BaseUnityPlugin
     {
-        static int shadowInventoryWorldId = 50;
-        static int shadowInventoryId;
-        static int shadowEquipmentWorldId = 51;
-        static int shadowEquipmentId;
+        /// <summary>
+        /// The id at which the shadow inventory world objects start.
+        /// </summary>
+        static readonly int shadowInventoryWorldIdStart = 50;
+        static readonly int maxShadowInventoryCount = 25;
+        /// <summary>
+        /// The id at which the shadow inventory world objects end + 1.
+        /// </summary>
+        static readonly int shadowInventoryWorldIdEnd = shadowInventoryWorldIdStart + 2 * maxShadowInventoryCount;
 
         [HarmonyPrefix]
         [HarmonyPatch(typeof(GaugesConsumptionHandler), nameof(GaugesConsumptionHandler.GetThirstConsumptionRate))]
@@ -52,43 +58,93 @@ namespace FeatMultiplayer
             return true;
         }
 
-        static void PrepareShadowInventories()
+        static void PrepareShadowInventories(ClientConnection cc)
         {
-            // The other player's shadow inventory
-            if (TryPrepareShadowInventory(shadowInventoryWorldId, ref shadowInventoryId))
+            string playerName = cc.clientName;
+            string playerNamePrefix = "~" + playerName + ";";
+
+            int createNewAt = -1;
+            int id;
+            for (id = shadowInventoryWorldIdStart; id < shadowInventoryWorldIdEnd; id += 2)
             {
-                SetupInitialInventory();
+                WorldObject wo = WorldObjectsHandler.GetWorldObjectViaId(id);
+                if (wo != null && wo.GetText() != null && wo.GetText().StartsWith(playerNamePrefix))
+                {
+                    LogInfo("Found shadow world objects for " + playerName + " at id " + id);
+                    createNewAt = -1;
+                    break;
+                }
+                else if (wo == null || (wo.GetText() != null && wo.GetText().Length == 0))
+                {
+                    if (createNewAt < 0)
+                    {
+                        createNewAt = id;
+                    }
+                }
             }
-            TryPrepareShadowInventory(shadowEquipmentWorldId, ref shadowEquipmentId);
+
+            if (createNewAt >= 0)
+            {
+                id = createNewAt;
+                LogInfo("Creating new set of shadow world objects for " + playerName + " at " + id);
+            }
+
+            if (TryPrepareShadowInventory(id, ref cc.shadowBackpack, out var wo2))
+            {
+                SetupInitialInventory(cc);
+                wo2.SetText(playerNamePrefix);
+            }
+            TryPrepareShadowInventory(id + 1, ref cc.shadowEquipment, out _);
+
+            cc.shadowBackpackWorldObjectId = id;
+            cc.shadowEquipmentWorldObjectId = id + 1;
+
+            LogInfo("ReceiveLogin: Player " + playerName + " has " + cc.shadowBackpack.GetInsideWorldObjects().Count + " items in its backpack");
+            LogInfo("  backpack inventory  id " + cc.shadowBackpack.GetId());
+            LogInfo("ReceiveLogin: Player " + playerName + " has " + cc.shadowEquipment.GetInsideWorldObjects().Count + " items in its equipment");
+            LogInfo("  equipment inventory id " + cc.shadowEquipment.GetId());
+
+            StorageRestoreClient(cc);
+            StorageNotifyClient(cc);
         }
 
-        static bool TryPrepareShadowInventory(int id, ref int inventoryId)
+        static bool TryPrepareShadowInventory(int id, ref Inventory inventoryOut, out WorldObject wo)
         {
-            WorldObject wo = WorldObjectsHandler.GetWorldObjectViaId(id);
+            wo = WorldObjectsHandler.GetWorldObjectViaId(id);
             if (wo == null)
             {
                 LogInfo("Creating special inventory " + id);
 
                 wo = WorldObjectsHandler.CreateNewWorldObject(GroupsHandler.GetGroupViaId("Container2"), id);
+                wo.SetText("");
                 wo.SetPositionAndRotation(new Vector3(-500, -500, -450), Quaternion.identity);
                 WorldObjectsHandler.InstantiateWorldObject(wo, true);
                 Inventory inv = InventoriesHandler.CreateNewInventory(1000, 0);
                 int invId = inv.GetId();
-                inventoryId = invId;
                 wo.SetLinkedInventoryId(invId);
                 wo.SetDontSaveMe(false);
+                inventoryOut = inv;
                 return true;
             }
             else
             {
-                inventoryId = wo.GetLinkedInventoryId();
+                int invId = wo.GetLinkedInventoryId();
+                var inv = InventoriesHandler.GetInventoryById(invId);
+                if (inv == null)
+                {
+                    LogInfo("Recreating special inventory " + id);
+                    inv = InventoriesHandler.CreateNewInventory(1000, 0);
+                    wo.SetLinkedInventoryId(inv.GetId());
+                    inventoryOut = inv;
+                    return true;
+                }
+                inventoryOut = inv;
             }
             return false;
         }
 
-        static void AddToInventory(int iid, Dictionary<string, int> itemsToAdd)
+        static void AddToInventory(Inventory inv, Dictionary<string, int> itemsToAdd, ClientConnection cc)
         {
-            var inv = InventoriesHandler.GetInventoryById(iid);
             foreach (var kv in itemsToAdd)
             {
                 var gr = GroupsHandler.GetGroupViaId(kv.Key);
@@ -97,7 +153,24 @@ namespace FeatMultiplayer
                     for (int i = 0; i < kv.Value; i++)
                     {
                         var wo = WorldObjectsHandler.CreateNewWorldObject(gr);
-                        inv.AddItem(wo);
+                        if (cc != null)
+                        {
+                            SendWorldObjectTo(wo, false, cc);
+                        }
+                        else
+                        {
+                            SendWorldObjectToClients(wo, false);
+                        }
+                        if (!inv.AddItem(wo))
+                        {
+                            LogWarning("Could not add " + kv.Key + " to " + inv.GetId() + ". Inventory full?!");
+                        }
+                        /*
+                        else
+                        {
+                            LogInfo("AddToInventory > " + iid + ": " + kv.Key + " [" + i + " / " + kv.Value + "] @ " + inv.GetInsideWorldObjects().Count);
+                        }
+                        */
                     }
                 }
                 else
@@ -107,7 +180,7 @@ namespace FeatMultiplayer
             }
         }
 
-        static void SetupInitialInventory()
+        static void SetupInitialInventory(ClientConnection cc)
         {
             LogInfo("SetupInitialInventory");
 
@@ -117,7 +190,7 @@ namespace FeatMultiplayer
                 stacks = Math.Min(10, Math.Max(stacks, stackSize.Value));
             }
 
-            AddToInventory(shadowInventoryId, new()
+            AddToInventory(cc.shadowBackpack, new()
             {
                 { "MultiBuild", 1 },
                 { "MultiDeconstruct", 1 },
@@ -131,32 +204,71 @@ namespace FeatMultiplayer
                 { "OxygenCapsule1", stacks },
                 { "WaterBottle1", stacks },
                 { "astrofood", stacks }
-            });
+            }, cc);
         }
 
         static void SetupHostInventory()
         {
             LogInfo("SetupHostInventory");
 
-            List<GroupItem> groupsToAdd = new();
+            List<Group> groupsToAdd = new();
             foreach (var gr in GroupsHandler.GetAllGroups())
             {
                 if (gr is GroupItem gi)
                 {
                     string item = gi.GetId();
-                    if (!item.StartsWith("Rocket") || item == "RocketReactor")
+                    /* FIXME not sure what happened to random effigie spawing yet
+                    if (item == "GoldenEffigieSpawner")
                     {
-                        groupsToAdd.Add(gi);
+                        foreach (var gc in gi.GetAssociatedGroups())
+                        {
+                            groupsToAdd.Add(GroupsHandler.GetGroupViaId(gc.id));
+                        }
+                        continue;
                     }
+                    */
+                    if (item.StartsWith("Rocket") && item != "RocketReactor")
+                    {
+                        continue;
+                    }
+                    if (item.EndsWith("Hatched")) {
+                        continue;
+                    }
+                    if (item.StartsWith("Algae") && item.EndsWith("Growable"))
+                    {
+                        continue;
+                    }
+                    if (item.StartsWith("Algae") && item.EndsWith("Growable"))
+                    {
+                        continue;
+                    }
+                    if (item.StartsWith("Tree") && item.EndsWith("Growable"))
+                    {
+                        continue;
+                    }
+                    if (item.StartsWith("Seed") && item.EndsWith("Growable"))
+                    {
+                        continue;
+                    }
+                    if (item.StartsWith("DebrisContainer"))
+                    {
+                        continue;
+                    }
+                    groupsToAdd.Add(gi);
                 }
             }
             groupsToAdd.Sort((a, b) =>
             {
-                if (a.GetEquipableType() != DataConfig.EquipableType.Null && b.GetEquipableType() == DataConfig.EquipableType.Null)
+                var ga = a as GroupItem;
+                var gb = b as GroupItem;
+                var ea = ga != null ? ga.GetEquipableType() : DataConfig.EquipableType.Null;
+                var eb = gb != null ? gb.GetEquipableType() : DataConfig.EquipableType.Null;
+
+                if (ea != DataConfig.EquipableType.Null && eb == DataConfig.EquipableType.Null)
                 {
                     return 1;
                 }
-                if (a.GetEquipableType() == DataConfig.EquipableType.Null && b.GetEquipableType() != DataConfig.EquipableType.Null)
+                if (ea == DataConfig.EquipableType.Null && eb != DataConfig.EquipableType.Null)
                 {
                     return -1;
                 }
@@ -225,6 +337,42 @@ namespace FeatMultiplayer
                 {
                     return 1;
                 }
+                // --------------------------------
+                if (aid.StartsWith("Larvae") && !bid.StartsWith("Larvae"))
+                {
+                    return 1;
+                }
+                if (!aid.StartsWith("Larvae") && bid.StartsWith("Larvae"))
+                {
+                    return -1;
+                }
+                // --------------------------------
+                if (aid.StartsWith("Butterfly") && !bid.StartsWith("Butterfly"))
+                {
+                    return 1;
+                }
+                if (!aid.StartsWith("Butterfly") && bid.StartsWith("Butterfly"))
+                {
+                    return -1;
+                }
+                // --------------------------------
+                if (aid.StartsWith("Bee") && !bid.StartsWith("Bee"))
+                {
+                    return 1;
+                }
+                if (!aid.StartsWith("Bee") && bid.StartsWith("Bee"))
+                {
+                    return -1;
+                }
+                // --------------------------------
+                if (aid.StartsWith("SilkWorm") && !bid.StartsWith("SilkWorm"))
+                {
+                    return 1;
+                }
+                if (!aid.StartsWith("SilkWorm") && bid.StartsWith("SilkWorm"))
+                {
+                    return -1;
+                }
 
                 return a.GetId().CompareTo(b.GetId());
             });
@@ -255,14 +403,14 @@ namespace FeatMultiplayer
                     var inv = go.GetComponent<InventoryAssociated>().GetInventory();
                     inv.SetSize(perChest);
 
-                    SendWorldObject(wo, false);
-                    Send(new MessageInventorySize()
+                    SendWorldObjectToClients(wo, false);
+                    SendAllClients(new MessageInventorySize()
                     {
                         inventoryId = inv.GetId(),
                         size = inv.GetSize()
                     });
 
-                    AddToInventory(inv.GetId(), dict);
+                    AddToInventory(inv, dict, null);
 
                     pos.y += 1f;
                 }

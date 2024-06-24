@@ -1,6 +1,6 @@
 ﻿using BepInEx;
 using HarmonyLib;
-using MijuTools;
+using LibCommon;
 using Open.Nat;
 using SpaceCraft;
 using System;
@@ -10,12 +10,12 @@ using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
-using System.Text;
+using System.Reflection;
 using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.InputSystem;
-using UnityEngine.SceneManagement;
 using UnityEngine.UI;
+using static UnityEngine.UIElements.UIRAtlasAllocator;
 
 namespace FeatMultiplayer
 {
@@ -23,6 +23,7 @@ namespace FeatMultiplayer
     {
         static GameObject parent;
 
+        static GameObject modTitle;
         static GameObject hostModeCheckbox;
         static GameObject hostLocalIPText;
         static GameObject upnpCheckBox;
@@ -31,8 +32,9 @@ namespace FeatMultiplayer
 
         static GameObject clientModeText;
         static GameObject clientTargetAddressText;
-        static GameObject clientNameText;
-        static GameObject clientJoinButton;
+        static readonly List<GameObject> clientJoinButtons = new();
+        static readonly List<string> playerNames = new();
+        static readonly List<string> playerPasswords = new();
 
         static volatile string externalIP;
         static volatile string externalMap;
@@ -43,14 +45,28 @@ namespace FeatMultiplayer
         static readonly Color interactiveColorHighlight2 = new Color(0.85f, 1, 0.5f, 1f);
         static readonly Color defaultColor = new Color(1f, 1f, 1f, 1f);
 
+        static Intro introInstance;
+        static readonly List<GameObject> mpRows = new();
+        static GameObject mainmenuBackground;
+        static GameObject mainmenuTitleBackground;
+
         [HarmonyPostfix]
         [HarmonyPatch(typeof(Intro), "Start")]
         static void Intro_Start(Intro __instance)
         {
             LogInfo("Intro_Start");
             updateMode = MultiplayerMode.MainMenu;
+            introInstance = __instance;
 
             int rows = 9;
+
+            mpRows.Clear();
+            clientJoinButtons.Clear();
+
+            playerNames.Clear();
+            playerNames.AddRange(clientName.Value.Split(','));
+            playerPasswords.Clear();
+            playerPasswords.AddRange(clientPassword.Value.Split(','));
 
             parent = new GameObject("MultiplayerMenu");
             Canvas canvas = parent.AddComponent<Canvas>();
@@ -66,10 +82,31 @@ namespace FeatMultiplayer
 
             // -------------------------
 
-            var background = new GameObject("MultiplayerMenu_Background");
-            background.transform.parent = parent.transform;
+            mainmenuTitleBackground = new GameObject("MultiplayerMenu_Background2");
+            mainmenuTitleBackground.transform.parent = parent.transform;
 
-            var img = background.AddComponent<Image>();
+            var img0 = mainmenuTitleBackground.AddComponent<Image>();
+            img0.color = new Color(0.20f, 0.20f, 0.20f, 0.99f);
+
+            rectTransform = img0.GetComponent<RectTransform>();
+            rectTransform.localPosition = new Vector2(backgroundX, dy + fs + 10);
+            rectTransform.sizeDelta = new Vector2(350, fs + 20);
+
+            modTitle = CreateText("(Feat) Multiplayer Mod v" + PluginInfo.PLUGIN_VERSION, fs, false);
+
+            rectTransform = modTitle.GetComponent<Text>().GetComponent<RectTransform>();
+            rectTransform.localPosition = new Vector2(backgroundX, dy + fs + 10);
+            rectTransform.sizeDelta = new Vector2(350, fs + 5);
+
+            Text modTitleText = modTitle.GetComponent<Text>();
+            modTitleText.fontStyle = FontStyle.Bold;
+
+            // -------------------------
+
+            mainmenuBackground = new GameObject("MultiplayerMenu_Background");
+            mainmenuBackground.transform.parent = parent.transform;
+
+            var img = mainmenuBackground.AddComponent<Image>();
             img.color = new Color(0f, 0f, 0f, 0.95f);
 
             rectTransform = img.GetComponent<RectTransform>();
@@ -82,15 +119,22 @@ namespace FeatMultiplayer
             rectTransform.localPosition = new Vector2(dx, dy);
             rectTransform.sizeDelta = new Vector2(dw, fs + 5);
 
+            mpRows.Add(hostModeCheckbox);
             dy -= fs + 10;
 
-            hostLocalIPText = CreateText("    Local Address = " + GetMainIPv4() + ":" + port.Value, fs);
+            var localAddrStr = GetHostLocalAddress() + ":" + port.Value;
+            if (streamerMode.Value)
+            {
+                localAddrStr = "<redacted>";
+            }
+            hostLocalIPText = CreateText("    Local Address = " + localAddrStr, fs);
             rectTransform = hostLocalIPText.GetComponent<Text>().GetComponent<RectTransform>();
             rectTransform.localPosition = new Vector2(dx, dy);
             rectTransform.sizeDelta = new Vector2(dw, fs + 5);
 
             LogInfo(GetMainIPv6());
 
+            mpRows.Add(hostLocalIPText);
             dy -= fs + 10;
 
             upnpCheckBox = CreateText(GetUPnPString(), fs, true);
@@ -99,6 +143,7 @@ namespace FeatMultiplayer
             rectTransform.localPosition = new Vector2(dx, dy);
             rectTransform.sizeDelta = new Vector2(dw, fs + 5);
 
+            mpRows.Add(upnpCheckBox);
             dy -= fs + 10;
 
             hostExternalIPText = CreateText(GetExternalAddressString(), fs);
@@ -107,6 +152,7 @@ namespace FeatMultiplayer
             rectTransform.localPosition = new Vector2(dx, dy);
             rectTransform.sizeDelta = new Vector2(dw, fs + 5);
 
+            mpRows.Add(hostExternalIPText);
             dy -= fs + 10;
 
             hostExternalMappingText = CreateText(GetExternalMappingString(), fs);
@@ -115,6 +161,7 @@ namespace FeatMultiplayer
             rectTransform.localPosition = new Vector2(dx, dy);
             rectTransform.sizeDelta = new Vector2(dw, fs + 5);
 
+            mpRows.Add(hostExternalMappingText);
             dy -= fs + 20;
 
             clientModeText = CreateText("--- Client Mode ---", fs);
@@ -123,39 +170,68 @@ namespace FeatMultiplayer
             rectTransform.localPosition = new Vector2(dx, dy);
             rectTransform.sizeDelta = new Vector2(dw, fs + 5);
 
+            mpRows.Add(clientModeText);
             dy -= fs + 10;
 
-            clientTargetAddressText = CreateText("    Host Address = " + hostAddress.Value + ":" + port.Value, fs);
+            var hostAddrStr = hostAddress.Value + ":" + port.Value;
+            if (streamerMode.Value)
+            {
+                hostAddrStr = "<redacted>";
+            }
+            clientTargetAddressText = CreateText("    Host Address = " + hostAddrStr, fs);
 
             rectTransform = clientTargetAddressText.GetComponent<Text>().GetComponent<RectTransform>();
             rectTransform.localPosition = new Vector2(dx, dy);
             rectTransform.sizeDelta = new Vector2(dw, fs + 5);
 
+            mpRows.Add(clientTargetAddressText);
             dy -= fs + 10;
 
-            clientNameText = CreateText("    Client Name = " + clientName.Value, fs);
+            foreach (var clientName in playerNames) {
 
-            rectTransform = clientNameText.GetComponent<Text>().GetComponent<RectTransform>();
-            rectTransform.localPosition = new Vector2(dx, dy);
-            rectTransform.sizeDelta = new Vector2(dw, fs + 5);
+                var joinBtn = CreateText("  [ Join as " + clientName + " ] ", fs, true);
 
-            dy -= fs + 10;
+                rectTransform = joinBtn.GetComponent<Text>().GetComponent<RectTransform>();
+                rectTransform.localPosition = new Vector2(dx, dy);
+                rectTransform.sizeDelta = new Vector2(dw, fs + 5);
 
-            clientJoinButton = CreateText("  [ Click Here to Join Game ] ", fs, true);
+                clientJoinButtons.Add(joinBtn);
+                mpRows.Add(joinBtn);
 
-            rectTransform = clientJoinButton.GetComponent<Text>().GetComponent<RectTransform>();
-            rectTransform.localPosition = new Vector2(dx, dy);
-            rectTransform.sizeDelta = new Vector2(dw, fs + 5);
+                dy -= fs + 10;
+            }
+
+            CheckBepInEx();
         }
 
         static string GetHostModeString()
         {
-            return "( " + (hostMode.Value ? "X" : " ") + " ) Host a multiplayer game";
+            return "( " + (hostMode.Value ? "X" : "  ") + " ) Host a multiplayer game";
         }
 
         static string GetUPnPString()
         {
-            return "( " + (useUPnP.Value ? "X" : " ") + " ) Use UPnP";
+            return "( " + (useUPnP.Value ? "X" : "  ") + " ) Use UPnP";
+        }
+
+        static string GetHostLocalAddress()
+        {
+            var hostIp = hostServiceAddress.Value;
+            IPAddress hostIPAddress = IPAddress.Any;
+            if (hostIp == "default")
+            {
+                hostIPAddress = GetMainIPv4();
+            }
+            else
+            if (hostIp == "defaultv6")
+            {
+                hostIPAddress = GetMainIPv6();
+            }
+            else
+            {
+                hostIPAddress = IPAddress.Parse(hostIp);
+            }
+            return hostIPAddress.ToString();
         }
 
         static string GetExternalAddressString()
@@ -178,11 +254,20 @@ namespace FeatMultiplayer
                         LogInfo("External IP = " + ip);
                         externalIP = "    External Address = " + ip.ToString();
 
+                        // PMPNatDevice doesn't support this call apparently
                         try
                         {
                             var mapping = await device.GetSpecificMappingAsync(Protocol.Tcp, portNum).ConfigureAwait(false);
                             LogInfo("Current Mapping = " + mapping);
-
+                        }
+                        catch (Exception ex)
+                        {
+                            // Ignore it for now
+                            LogInfo("Current Mapping = error");
+                            LogInfo(ex);
+                        }
+                        try
+                        {
                             await device.CreatePortMapAsync(new Mapping(Protocol.Tcp, portNum, portNum, "The Planet Crafter Multiplayer")).ConfigureAwait(false);
                             externalMap = "    External Mapping = ok";
                         }
@@ -217,8 +302,54 @@ namespace FeatMultiplayer
 
         void DoMainMenuUpdate()
         {
-            if (parent != null)
+            var noMenu = true;
+            if (introInstance != null)
             {
+                if (introInstance.optionsMenu.activeSelf)
+                {
+                    noMenu = false;
+                }
+                if (introInstance.saveFilesContainer.activeSelf)
+                {
+                    noMenu = false;
+                }
+            }
+            if (parent != null && noMenu)
+            {
+                float maxWidth = 0;
+                int fs = fontSize.Value;
+
+                foreach (var go in mpRows)
+                {
+                    var w = go.GetComponent<Text>().preferredWidth;
+                    maxWidth = Math.Max(maxWidth, w);
+                }
+
+                maxWidth = Math.Max(maxWidth, modTitle.GetComponent<Text>().preferredWidth);
+
+                var dx = (Screen.width - maxWidth) / 2 - 20;
+                float dy = Screen.height / 2 - mpRows.Count / 2f * (fs + 10) + 10;
+
+                var rtb = mainmenuBackground.GetComponent<RectTransform>();
+                rtb.localPosition = new Vector3(dx, Screen.height / 2 - mpRows.Count * (fs + 10) + 10 + (fs + 10) / 2, 0);
+                rtb.sizeDelta = new Vector2(maxWidth + 20, mpRows.Count * (fs + 10) + 20);
+
+                var rtb2 = mainmenuTitleBackground.GetComponent<RectTransform>();
+                rtb2.localPosition = rtb.localPosition + new Vector3(0, rtb.sizeDelta.y / 2 + fs / 2 + 10);
+                rtb2.sizeDelta = new Vector2(maxWidth + 20, fs + 20);
+
+                var tt = modTitle.GetComponent<RectTransform>();
+                tt.localPosition = rtb2.localPosition + new Vector3(10, 0, 0);
+                tt.sizeDelta = rtb2.sizeDelta;
+
+                foreach (var go in mpRows)
+                {
+                    var rt = go.GetComponent<RectTransform>();
+                    rt.localPosition = new Vector3(dx, dy, 0);
+                    rt.sizeDelta = new Vector2(maxWidth, fs + 5);
+                    dy -= fs + 10;
+                }
+
                 var mouse = Mouse.current.position.ReadValue();
                 if (Mouse.current.leftButton.wasPressedThisFrame)
                 {
@@ -235,24 +366,42 @@ namespace FeatMultiplayer
                         hostExternalIPText.GetComponent<Text>().text = GetExternalAddressString();
                         hostExternalMappingText.GetComponent<Text>().text = GetExternalMappingString();
                     }
-                    if (IsWithin(clientJoinButton, mouse))
+                    for (int i = 0; i < clientJoinButtons.Count; i++)
                     {
-                        hostModeCheckbox.GetComponent<Text>().text = GetHostModeString();
-                        updateMode = MultiplayerMode.CoopClient;
-                        File.Delete(Application.persistentDataPath + "\\Player_Client.log");
-                        clientJoinButton.GetComponent<Text>().text = " !!! Joining a game !!!";
-                        CreateMultiplayerSaveAndEnter();
+                        GameObject joinBtn = clientJoinButtons[i];
+                        if (IsWithin(joinBtn, mouse))
+                        {
+                            clientJoinName = playerNames[i];
+                            clientJoinPassword = playerPasswords[i];
+
+                            hostModeCheckbox.GetComponent<Text>().text = GetHostModeString();
+                            updateMode = MultiplayerMode.CoopClient;
+                            File.Delete(Application.persistentDataPath + "/Player_Client.log");
+                            File.Delete(Application.persistentDataPath + "/Player_Client_" + clientJoinName + ".log");
+                            joinBtn.GetComponent<Text>().text = " !!! Joining a game !!!";
+                            CreateMultiplayerSaveAndEnter();
+                        }
                     }
                 }
                 hostModeCheckbox.GetComponent<Text>().color = IsWithin(hostModeCheckbox, mouse) ? interactiveColorHighlight : interactiveColor;
                 upnpCheckBox.GetComponent<Text>().color = IsWithin(upnpCheckBox, mouse) ? interactiveColorHighlight : interactiveColor;
-                clientJoinButton.GetComponent<Text>().color = IsWithin(clientJoinButton, mouse) ? interactiveColorHighlight2 : interactiveColor2;
+                foreach (var joinBtn in clientJoinButtons)
+                {
+                    joinBtn.GetComponent<Text>().color = IsWithin(joinBtn, mouse) ? interactiveColorHighlight2 : interactiveColor2;
+                }
 
                 var eip = externalIP;
                 if (eip != null)
                 {
                     externalIP = null;
-                    hostExternalIPText.GetComponent<Text>().text = eip;
+                    if (streamerMode.Value)
+                    {
+                        hostExternalIPText.GetComponent<Text>().text = "<redacted>";
+                    }
+                    else
+                    {
+                        hostExternalIPText.GetComponent<Text>().text = eip;
+                    }
                 }
                 var emp = externalMap;
                 if (emp != null)
@@ -315,6 +464,14 @@ namespace FeatMultiplayer
         static void SaveFilesSelector_SelectedSaveFile(string _fileName)
         {
             parent.SetActive(false);
+            MainMenuContinue();
+        }
+
+        /// <summary>
+        /// Sets the update mode when loading as save or clicking on continue.
+        /// </summary>
+        public static void MainMenuContinue()
+        {
             if (hostMode.Value)
             {
                 updateMode = MultiplayerMode.CoopHost;
@@ -323,6 +480,14 @@ namespace FeatMultiplayer
             else
             {
                 updateMode = MultiplayerMode.SinglePlayer;
+            }
+        }
+
+        static void CheckBepInEx()
+        {
+            if (!BepInExConfigCheck.Check(Assembly.GetExecutingAssembly(), theLogger))
+            {
+                NotifyUser(BepInExConfigCheck.DefaultMessage, 30);
             }
         }
     }

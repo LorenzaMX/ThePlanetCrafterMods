@@ -6,15 +6,15 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessagePlaceConstructible : MessageStringProvider
+    internal class MessagePlaceConstructible : MessageBase
     {
         internal string groupId;
         internal Vector3 position;
         internal Quaternion rotation;
 
-        public string GetString()
+        public override string GetString()
         {
             return "PlaceConstructible|" + groupId
                 + "|" + DataTreatments.Vector3ToString(position)

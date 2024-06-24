@@ -4,11 +4,12 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessageUpdateWorldObject
+    internal class MessageUpdateWorldObject : MessageBase
     {
         internal MessageWorldObject worldObject;
+
         public static bool TryParse(string str, out MessageUpdateWorldObject mc)
         {
             if (MessageHelper.TryParseMessage("UpdateWorldObject|", str, out var parameters))
@@ -25,6 +26,15 @@ namespace FeatMultiplayer
             }
             mc = null;
             return false;
+        }
+
+        public override string GetString()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("UpdateWorldObject|");
+            MessageWorldObject.AppendWorldObject(sb, '|', worldObject, worldObject.makeGrabable);
+            sb.Append('\n');
+            return sb.ToString();
         }
     }
 }

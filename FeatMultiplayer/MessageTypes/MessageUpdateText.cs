@@ -4,9 +4,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessageUpdateText : MessageStringProvider
+    internal class MessageUpdateText : MessageBase
     {
         internal int id;
         internal string text;
@@ -21,7 +21,7 @@ namespace FeatMultiplayer
                     {
                         mut = new MessageUpdateText();
                         mut.id = int.Parse(parameters[1]);
-                        mut.text = parameters[2];
+                        mut.text = MessageHelper.DecodeText(parameters[2]);
                         return true;
                     }
                     catch (Exception ex)
@@ -38,9 +38,15 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
-            return "UpdateText|" + id + "|" + text + "\n";
+            StringBuilder sb = new();
+            sb.Append("UpdateText|");
+            sb.Append(id);
+            sb.Append('|');
+            MessageHelper.EncodeText(text, sb);
+            sb.Append('\n');
+            return sb.ToString();
         }
     }
 }

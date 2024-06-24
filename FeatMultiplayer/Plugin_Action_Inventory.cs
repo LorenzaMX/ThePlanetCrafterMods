@@ -1,7 +1,6 @@
 ﻿using BepInEx;
 using BepInEx.Configuration;
 using HarmonyLib;
-using MijuTools;
 using SpaceCraft;
 using System;
 using System.Collections;
@@ -11,6 +10,7 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -28,36 +28,9 @@ namespace FeatMultiplayer
 
         static ConfigEntry<int> stackSize;
 
-        /// <summary>
-        /// Helps retarget the client's backpack and equipment ids to the shadow inventory and shadow equipment storages.
-        /// </summary>
-        /// <param name="hostInventoryId">The id on the host</param>
-        /// <param name="clientInventoryId">The shadow id.</param>
-        /// <returns>If false, the inventory should not be accessed at all.</returns>
-        static bool TryConvertHostToClientInventoryId(int hostInventoryId, out int clientInventoryId)
-        {
-            // Ignore the Host's own backpack and equipment
-            if (hostInventoryId == 1 || hostInventoryId == 2)
-            {
-                clientInventoryId = 0;
-                return false;
-            }
-            // If it is the shadow inventory/equipment, retarget it to the standard ids for the client
-            if (hostInventoryId == shadowInventoryId)
-            {
-                clientInventoryId = 1;
-            }
-            else
-            if (hostInventoryId == shadowEquipmentId)
-            {
-                clientInventoryId = 2;
-            }
-            else
-            {
-                clientInventoryId = hostInventoryId;
-            }
-            return true;
-        }
+        static Func<Inventory, string, bool> isFullStacked;
+
+        static bool equipmentSwapMarker;
 
         /// <summary>
         /// The vanilla game calls Inventory::AddItem all over the place to try to add to the player's backpack,
@@ -80,22 +53,54 @@ namespace FeatMultiplayer
             {
                 int iid = ___inventoryId;
 
-                if (updateMode == MultiplayerMode.CoopHost)
+                // except the host's own inventory
+                if (updateMode == MultiplayerMode.CoopHost
+                    && (iid == 1 || iid == 2))
                 {
-                    if (!TryConvertHostToClientInventoryId(iid, out iid))
-                    {
-                        return;
-                    }
+                    return;
                 }
+
                 var mia = new MessageInventoryAdded()
                 {
-                    inventoryId = iid,
+                    inventoryId = iid, // we will override this below if necessary
                     itemId = _worldObject.GetId(),
                     groupId = _worldObject.GetGroup().GetId()
                 };
-                LogInfo("InventoryAddItem: Send " + iid + ", " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
-                Send(mia);
-                Signal();
+
+                if (updateMode == MultiplayerMode.CoopHost)
+                {
+                    // is the target one of the shadow inventories?
+                    foreach (var cc in _clientConnections.Values)
+                    {
+                        if (cc.shadowBackpack != null && cc.shadowBackpack.GetId() == iid)
+                        {
+                            mia.inventoryId = 1;
+
+                            LogInfo("InventoryAddItem: Send [" + cc.clientName + "] = " + iid + " (shadow backpack), " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
+                            cc.Send(mia);
+                            cc.Signal();
+                            return;
+                        }
+                        else if (cc.shadowEquipment != null && cc.shadowEquipment.GetId() == iid)
+                        {
+                            mia.inventoryId = 2;
+
+                            LogInfo("InventoryAddItem: Send [" + cc.clientName + "] = " + iid + " (shadow equipment), " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
+                            cc.Send(mia);
+                            cc.Signal();
+                            return;
+                        }
+                    }
+                    // looks like a regular world inventory
+                    // let all of them known
+                    LogInfo("InventoryAddItem: Send [*] = " + iid + ", " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
+                    SendAllClients(mia, true);
+                } 
+                else
+                {
+                    LogInfo("InventoryAddItem: Send [host] = " + iid + ", " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
+                    SendHost(mia, true);
+                }
             }
         }
 
@@ -114,40 +119,57 @@ namespace FeatMultiplayer
         [HarmonyPatch(typeof(Inventory), nameof(Inventory.RemoveItem))]
         static void Inventory_RemoveItem(int ___inventoryId, WorldObject _worldObject, bool _destroyWorldObject)
         {
-            if (!suppressInventoryChange)
+            if (updateMode != MultiplayerMode.SinglePlayer && !suppressInventoryChange)
             {
+                int iid = ___inventoryId;
+
+                // except the host's own inventory
+                if (updateMode == MultiplayerMode.CoopHost
+                    && (iid == 1 || iid == 2))
+                {
+                    return;
+                }
+
+                var mir = new MessageInventoryRemoved()
+                {
+                    inventoryId = iid, // we will override this below
+                    itemId = _worldObject.GetId(),
+                    destroy = _destroyWorldObject
+                };
+
                 if (updateMode == MultiplayerMode.CoopHost)
                 {
-                    int iid = ___inventoryId;
-                    if (updateMode == MultiplayerMode.CoopHost)
+                    // is the target one of the shadow inventories?
+                    foreach (var cc in _clientConnections.Values)
                     {
-                        if (!TryConvertHostToClientInventoryId(iid, out iid))
+                        if (cc.shadowBackpack.GetId() == iid)
                         {
+                            mir.inventoryId = 1;
+
+                            LogInfo("InventoryRemoveItem: Send [" + cc.clientName + "] = " + iid + " (shadow backpack), " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
+                            cc.Send(mir);
+                            cc.Signal();
+                            return;
+                        }
+                        else if (cc.shadowEquipment.GetId() == iid)
+                        {
+                            mir.inventoryId = 2;
+
+                            LogInfo("InventoryRemoveItem: Send [" + cc.clientName + "] = " + iid + " (shadow equipment), " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
+                            cc.Send(mir);
+                            cc.Signal();
                             return;
                         }
                     }
-
-                    var mir = new MessageInventoryRemoved()
-                    {
-                        inventoryId = iid,
-                        itemId = _worldObject.GetId(),
-                        destroy = _destroyWorldObject
-                    };
-                    LogInfo("InventoryRemoveItem: " + iid + ", " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
-                    Send(mir);
-                    Signal();
+                    // looks like a regular world inventory
+                    // let all of them known
+                    LogInfo("InventoryRemoveItem: Send [*] = " + iid + ", " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
+                    SendAllClients(mir, true);
                 }
-                if (updateMode == MultiplayerMode.CoopClient && !suppressInventoryChange)
+                else
                 {
-                    var mir = new MessageInventoryRemoved()
-                    {
-                        inventoryId = ___inventoryId,
-                        itemId = _worldObject.GetId(),
-                        destroy = _destroyWorldObject
-                    };
-                    LogInfo("InventoryRemoveItem: " + ___inventoryId + ", " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
-                    Send(mir);
-                    Signal();
+                    LogInfo("InventoryRemoveItem: Send [host] = " + iid + ", " + _worldObject.GetId() + ", " + _worldObject.GetGroup().GetId());
+                    SendHost(mir, true);
                 }
             }
         }
@@ -191,20 +213,48 @@ namespace FeatMultiplayer
             {
 
                 int iid = ___inventoryId;
-                if (updateMode == MultiplayerMode.CoopHost) 
-                { 
-                    if (!TryConvertHostToClientInventoryId(iid, out iid))
-                    {
-                        return false;
-                    }
-                }
 
+                // except the host's own inventory
+                if (updateMode == MultiplayerMode.CoopHost &&
+                    (iid == 1 || iid == 2))
+                {
+                    return false;
+                }
                 var msi = new MessageSortInventory()
                 {
                     inventoryId = iid
                 };
-                Send(msi);
-                Signal();
+
+                if (updateMode == MultiplayerMode.CoopHost) 
+                {
+                    // is the target one of the shadow inventories?
+                    foreach (var cc in _clientConnections.Values)
+                    {
+                        if (cc.shadowBackpack.GetId() == iid)
+                        {
+                            msi.inventoryId = 1;
+
+                            cc.Send(msi);
+                            cc.Signal();
+                            return false;
+                        }
+                        else if (cc.shadowEquipment.GetId() == iid)
+                        {
+                            msi.inventoryId = 2;
+
+                            cc.Send(msi);
+                            cc.Signal();
+                            return false;
+                        }
+                    }
+                    // looks like a regular world inventory
+                    // let all of them known
+                    SendAllClients(msi, true);
+                }
+                else
+                {
+                    SendHost(msi, true);
+                }
             }
 
             return false;
@@ -227,10 +277,8 @@ namespace FeatMultiplayer
             return updateMode != MultiplayerMode.CoopClient;
         }
 
-        static void ClientConsumeRecipe(GroupConstructible gc)
+        static void ClientConsumeRecipe(GroupConstructible gc, Inventory inv)
         {
-            var inv = InventoriesHandler.GetInventoryById(shadowInventoryId);
-
             var toRemove = new List<Group>() { gc };
             if (inv.ContainsItems(toRemove))
             {
@@ -243,53 +291,95 @@ namespace FeatMultiplayer
                 inv.RemoveItems(toRemove, true, false);
             }
         }
-        static void ReceiveMessageInventoryAdded(MessageInventoryAdded mia)
+        
+        static void DispatchInventoryChange<T>(T mc, Action<T, Inventory> ifEquipment, Action<T, Inventory> otherwise) where T : MessageInventoryChanged
         {
-            int targetId = mia.inventoryId;
-            if (targetId == 1 && shadowInventoryId != 0)
+            Inventory targetInventory = null;
+            if (updateMode == MultiplayerMode.CoopHost)
             {
-                targetId = shadowInventoryId;
+                if (mc.inventoryId == 1)
+                {
+                    targetInventory = mc.sender.shadowBackpack;
+                }
+                else if (mc.inventoryId == 2)
+                {
+                    targetInventory = mc.sender.shadowEquipment;
+                }
+                else
+                {
+                    foreach (var cc in _clientConnections.Values)
+                    {
+                        var inv = cc.shadowBackpack;
+                        if (inv != null && inv.GetId() == mc.inventoryId)
+                        {
+                            LogWarning("Trying to access the shadow backpack of " + cc.clientName + " - " + mc.inventoryId);
+                            return;
+                        }
+                        inv = cc.shadowEquipment;
+                        if (inv != null && inv.GetId() == mc.inventoryId)
+                        {
+                            LogWarning("Trying to access a shadow equipment of " + cc.clientName + " - " + mc.inventoryId);
+                            return;
+                        }
+                    }
+                    targetInventory = InventoriesHandler.GetInventoryById(mc.inventoryId);
+                }
             }
             else
-            if (targetId == 2 && shadowEquipmentId != 0)
             {
-                targetId = shadowEquipmentId;
+                if (mc.inventoryId == 1)
+                {
+                    targetInventory = GetPlayerMainController().GetPlayerBackpack().GetInventory();
+                }
+                else if (mc.inventoryId == 2)
+                {
+                    targetInventory = GetPlayerMainController().GetPlayerEquipment().GetInventory();
+                    // on the client, apply the equipment and quit
+                    ifEquipment(mc, targetInventory);
+                    return;
+                }
+                else
+                {
+                    targetInventory = InventoriesHandler.GetInventoryById(mc.inventoryId);
+                }
             }
-            if (targetId == 2 && updateMode == MultiplayerMode.CoopClient)
+
+            otherwise(mc, targetInventory);
+        }
+
+        static void ReceiveMessageEquipmentAdded(MessageInventoryAdded mia, Inventory targetInventory)
+        {
+            // on the client, apply the equipment added and quit
+            suppressInventoryChange = true;
+            try
             {
-
-                suppressInventoryChange = true;
-                try
+                WorldObject wo = WorldObjectsHandler.GetWorldObjectViaId(mia.itemId);
+                if (wo != null)
                 {
-                    WorldObject wo = WorldObjectsHandler.GetWorldObjectViaId(mia.itemId);
-                    if (wo != null)
+                    if (!InventoryContainsId(targetInventory, wo.GetId()))
                     {
-                        var peq = GetPlayerMainController().GetPlayerEquipment();
-                        var peqInv = peq.GetInventory();
-
-                        if (!InventoryContainsId(peqInv, wo.GetId()))
-                        {
-                            peqInv.AddItem(wo);
-                        }
-                        TryApplyEquipment(wo, GetPlayerMainController(), null);
-
-                        LogInfo("ReceiveMessageInventoryAdded: Add Equipment " + mia.itemId + ", " + mia.groupId);
-
-                        peqInv.RefreshDisplayerContent();
+                        targetInventory.AddItem(wo);
                     }
-                    else
-                    {
-                        LogError("ReceiveMessageInventoryAdded: Add Equipment missing WorldObject " + mia.itemId + ", " + mia.groupId);
-                    }
+                    TryApplyEquipment(wo, GetPlayerMainController(), null);
+
+                    LogInfo("ReceiveMessageInventoryAdded: Add Equipment " + mia.itemId + ", " + mia.groupId);
+
+                    targetInventory.RefreshDisplayerContent();
                 }
-                finally
+                else
                 {
-                    suppressInventoryChange = false;
+                    LogError("ReceiveMessageInventoryAdded: Add Equipment missing WorldObject " + mia.itemId + ", " + mia.groupId);
                 }
-                return;
             }
-            var inv = InventoriesHandler.GetInventoryById(targetId);
-            if (inv != null)
+            finally
+            {
+                suppressInventoryChange = false;
+            }
+        }
+
+        static void ReceiveMessageOtherInventoryAdded(MessageInventoryAdded mia, Inventory targetInventory)
+        {
+            if (targetInventory != null)
             {
                 WorldObject wo = WorldObjectsHandler.GetWorldObjectViaId(mia.itemId);
                 if (wo == null && WorldObjectsIdHandler.IsWorldObjectFromScene(mia.itemId))
@@ -301,31 +391,36 @@ namespace FeatMultiplayer
                     suppressInventoryChange = updateMode == MultiplayerMode.CoopClient;
                     try
                     {
-                        if (!InventoryContainsId(inv, wo.GetId()))
+                        if (!InventoryContainsId(targetInventory, wo.GetId()))
                         {
-                            inv.AddItem(wo);
-                            LogInfo("ReceiveMessageInventoryAdded: " + mia.inventoryId + " <= " + mia.itemId + ", " + mia.groupId);
-                            inv.RefreshDisplayerContent();
+                            targetInventory.AddItem(wo);
+                            LogInfo("ReceiveMessageOtherInventoryAdded: " + mia.inventoryId + " <= " + mia.itemId + ", " + mia.groupId);
+                            targetInventory.RefreshDisplayerContent();
                         }
                     }
                     finally
                     {
                         suppressInventoryChange = false;
                     }
-                    if (inventorySpawning.Remove(targetId))
+                    if (inventorySpawning.Remove(targetInventory.GetId()))
                     {
-                        LogInfo("ReceiveMessageInventoryAdded: Clearing inventorySpawning marker " + mia.inventoryId);
+                        LogInfo("ReceiveMessageOtherInventoryAdded: Clearing inventorySpawning marker " + mia.inventoryId);
                     }
                 }
                 else
                 {
-                    LogWarning("ReceiveMessageInventoryAdded: Uknown WorldObject " + mia.inventoryId + " <= " + mia.itemId + ", " + mia.groupId);
+                    LogWarning("ReceiveMessageOtherInventoryAdded: Uknown WorldObject " + mia.inventoryId + " <= " + mia.itemId + ", " + mia.groupId);
                 }
             }
             else
             {
-                LogWarning("ReceiveMessageInventoryAdded: Uknown inventory " + mia.inventoryId + " <= " + mia.itemId + ", " + mia.groupId);
+                LogWarning("ReceiveMessageOtherInventoryAdded: Uknown inventory " + mia.inventoryId + " <= " + mia.itemId + ", " + mia.groupId);
             }
+        }
+
+        static void ReceiveMessageInventoryAdded(MessageInventoryAdded mia)
+        {
+            DispatchInventoryChange(mia, ReceiveMessageEquipmentAdded, ReceiveMessageOtherInventoryAdded);
         }
 
         static bool InventoryContainsId(Inventory inv, int id)
@@ -340,81 +435,66 @@ namespace FeatMultiplayer
             return false;
         }
 
-        static void ReceiveMessageInventoryRemoved(MessageInventoryRemoved mia)
+        static void ReceiveMessageEquipmentRemoved(MessageInventoryRemoved mir, Inventory targetInventory)
         {
-            //LogInfo("ReceiveMessageInventoryRemoved - Begin");
-            int targetId = mia.inventoryId;
-            if (targetId == 1 && shadowInventoryId != 0)
+            suppressInventoryChange = true;
+            try
             {
-                targetId = shadowInventoryId;
-            }
-            else
-            if (targetId == 2 && shadowEquipmentId != 0)
-            {
-                targetId = shadowEquipmentId;
-            }
-            if (targetId == 2 && updateMode == MultiplayerMode.CoopClient)
-            {
-
-                suppressInventoryChange = true;
-                try
+                WorldObject wo = WorldObjectsHandler.GetWorldObjectViaId(mir.itemId);
+                if (wo != null)
                 {
-                    WorldObject wo = WorldObjectsHandler.GetWorldObjectViaId(mia.itemId);
-                    if (wo != null)
-                    {
-                        PlayerMainController player = GetPlayerMainController();
-                        var peq = player.GetPlayerEquipment();
-                        var peqInv = peq.GetInventory();
+                    targetInventory.RemoveItem(wo);
 
-                        peqInv.RemoveItem(wo);
-
-                        // if unequipping causes further inventory change, let it happen
-                        suppressInventoryChange = false;
-
-                        UnapplyUsingList(player, peqInv.GetInsideWorldObjects());
-
-                        LogInfo("ReceiveMessageInventoryRemoved: Remove Equipment " + mia.itemId + ", " + wo.GetGroup().GetId());
-                    }
-                    else
-                    {
-                        LogError("ReceiveMessageInventoryRemoved: Remove Equipment missing WorldObject " + mia.itemId);
-                    }
-                }
-                finally
-                {
+                    // if unequipping causes further inventory change, let it happen
                     suppressInventoryChange = false;
+
+                    UnapplyUsingList(GetPlayerMainController(), targetInventory.GetInsideWorldObjects());
+
+                    LogInfo("ReceiveMessageInventoryRemoved: Remove Equipment " + mir.itemId + ", " + wo.GetGroup().GetId());
+                }
+                else
+                {
+                    LogError("ReceiveMessageInventoryRemoved: Remove Equipment missing WorldObject " + mir.itemId);
                 }
             }
-            else
+            finally
             {
-                var inv = InventoriesHandler.GetInventoryById(targetId);
-                if (inv != null)
+                suppressInventoryChange = false;
+            }
+        }
+
+        static void ReceiveMessageOtherInventoryRemoved(MessageInventoryRemoved mir, Inventory targetInventory)
+        {
+            if (targetInventory != null)
+            {
+                WorldObject wo = WorldObjectsHandler.GetWorldObjectViaId(mir.itemId);
+                if (wo != null)
                 {
-                    WorldObject wo = WorldObjectsHandler.GetWorldObjectViaId(mia.itemId);
-                    if (wo != null)
+                    suppressInventoryChange = updateMode == MultiplayerMode.CoopClient;
+                    try
                     {
-                        suppressInventoryChange = updateMode == MultiplayerMode.CoopClient;
-                        try
-                        {
-                            inv.RemoveItem(wo, mia.destroy);
-                            LogInfo("ReceiveMessageInventoryRemoved: " + mia.inventoryId + " <= " + mia.itemId + ", " + wo.GetGroup().GetId());
-                        }
-                        finally
-                        {
-                            suppressInventoryChange = false;
-                        }
+                        targetInventory.RemoveItem(wo, mir.destroy);
+                        LogInfo("ReceiveMessageOtherInventoryRemoved: " + mir.inventoryId + " <= " + mir.itemId + ", " + wo.GetGroup().GetId());
                     }
-                    else
+                    finally
                     {
-                        LogWarning("ReceiveMessageInventoryRemoved: Unknown item " + mia.inventoryId + " <= " + mia.itemId);
+                        suppressInventoryChange = false;
                     }
                 }
                 else
                 {
-                    LogWarning("ReceiveMessageInventoryRemoved: Unknown inventory " + mia.inventoryId + " <= " + mia.itemId);
+                    LogWarning("ReceiveMessageOtherInventoryRemoved: Unknown item " + mir.inventoryId + " <= " + mir.itemId);
                 }
             }
-            //LogInfo("ReceiveMessageInventoryRemoved - End");
+            else
+            {
+                LogWarning("ReceiveMessageOtherInventoryRemoved: Unknown inventory " + mir.inventoryId + " <= " + mir.itemId);
+            }
+        }
+
+        static void ReceiveMessageInventoryRemoved(MessageInventoryRemoved mir)
+        {
+            DispatchInventoryChange(mir, ReceiveMessageEquipmentRemoved, ReceiveMessageOtherInventoryRemoved);
         }
 
         static void ReceiveMessageInventories(MessageInventories minv)
@@ -535,6 +615,8 @@ namespace FeatMultiplayer
                 }
             }
 
+            UpdateLogisticEntityFromMessage(inv, wi.demandGroups, wi.supplyGroups, wi.priority);
+
             if (changed)
             {
                 if (wi.id == 2)
@@ -634,6 +716,12 @@ namespace FeatMultiplayer
                     case DataConfig.EquipableType.MultiToolDeconstruct:
                         {
                             _playerController.GetMultitool().AddEnabledState(DataConfig.MultiToolState.Deconstruct);
+
+                            if (groupItem.GetGroupValue() == 2)
+                            {
+                                playerEquipmentHasDeconstructT2.SetValue(_playerController.GetPlayerEquipment(), true);
+                            }
+
                             break;
                         }
                     case DataConfig.EquipableType.MultiToolBuild:
@@ -643,7 +731,31 @@ namespace FeatMultiplayer
                         }
                     case DataConfig.EquipableType.CompassHUD:
                         {
+                            playerEquipmentHasCompassChip.SetValue(_playerController.GetPlayerEquipment(), true);
                             Managers.GetManager<CanvasCompass>().SetStatus(true);
+                            break;
+                        }
+                    case DataConfig.EquipableType.AirFilter:
+                        {
+                            _playerController.GetGaugesHandler().SetHasRebreather(_playerController.GetPlayerEquipment()
+                                    .GetInventory());
+                            break;
+                        }
+                    case DataConfig.EquipableType.MultiToolCleanConstruction:
+                        {
+                            playerEquipmentHasCleanConstructionChip.SetValue(
+                                _playerController.GetPlayerEquipment(), true);
+                            break;
+                        }
+                    case DataConfig.EquipableType.MapChip:
+                        {
+                            // Since 0.9.002: the field is not public
+                            playerEquipmentHasMapChip.SetValue(_playerController.GetPlayerEquipment(), true);
+                            break;
+                        }
+                    case DataConfig.EquipableType.PinChip:
+                        {
+                            Managers.GetManager<CanvasPinedRecipes>().SetMaxPinedItems(groupItem.GetGroupValue());
                             break;
                         }
                 }
@@ -667,6 +779,8 @@ namespace FeatMultiplayer
                 {
                     mt.RemoveEnabledState(DataConfig.MultiToolState.Deconstruct);
                 }
+                // FIXME may need to be conditional???
+                playerEquipmentHasDeconstructT2.SetValue(player.GetPlayerEquipment(), false);
             }
             if (!equipTypes.Contains(DataConfig.EquipableType.MultiToolLight))
             {
@@ -677,6 +791,7 @@ namespace FeatMultiplayer
             }
             if (!equipTypes.Contains(DataConfig.EquipableType.CompassHUD))
             {
+                playerEquipmentHasCompassChip.SetValue(player.GetPlayerEquipment(), false);
                 var cc = Managers.GetManager<CanvasCompass>();
                 cc.SetStatus(false);
             }
@@ -703,6 +818,34 @@ namespace FeatMultiplayer
                 player.GetMultitool()
                                 .GetMultiToolMine()
                                 .SetMineTimeReducer(0);
+            }
+            if (!equipTypes.Contains(DataConfig.EquipableType.AirFilter))
+            {
+                // Since 0.6.001: There is no simple boolean toggle;
+                // the method checks for the existence of the rebreather in the inventory
+                // thus we fake an empty inventory
+                player.GetGaugesHandler().SetHasRebreather(new Inventory(-1, 1));
+            }
+            if (!equipTypes.Contains(DataConfig.EquipableType.MultiToolCleanConstruction))
+            {
+                // Since 0.6.006: there is no publicly accessible field to set or method to call
+                playerEquipmentHasCleanConstructionChip.SetValue(
+                    player.GetPlayerEquipment(), false);
+            }
+            if (!equipTypes.Contains(DataConfig.EquipableType.MapChip))
+            {
+                // Since 0.9.002: the field is not public
+                playerEquipmentHasMapChip.SetValue(player.GetPlayerEquipment(), false);
+            }
+            if (!equipTypes.Contains(DataConfig.EquipableType.PinChip))
+            {
+                Managers.GetManager<CanvasPinedRecipes>().SetMaxPinedItems(0);
+            }
+            if (equipmentSwapMarker)
+            {
+                LogInfo("UnapplyEquipment: EquipmentSwapMarker received, suppressing dropping excess items for one turn");
+                equipmentSwapMarker = false;
+                return;
             }
             // FIXME backpack and equipment mod unequipping
             float dropDistance = 0.7f;
@@ -767,6 +910,7 @@ namespace FeatMultiplayer
         {
             if (getStackCount != null)
             {
+                // fine, always run against the player's inventory which always stacks
                 return inv.GetSize() < getStackCount(inv.GetInsideWorldObjects());
             }
             return inv.IsFull();
@@ -788,21 +932,24 @@ namespace FeatMultiplayer
 
         static void ReceiveMessageSortInventory(MessageSortInventory msi)
         {
-            int targetId = msi.inventoryId;
-            if (targetId != 2)
+            if (msi.inventoryId != 2)
             {
+                Inventory targetInventory = null;
                 // retarget shadow inventory
-                if (targetId == 1 && updateMode == MultiplayerMode.CoopHost)
+                if (msi.inventoryId == 1 && updateMode == MultiplayerMode.CoopHost)
                 {
-                    targetId = shadowInventoryId;
+                    targetInventory = msi.sender.shadowBackpack;
                 }
-                Inventory inv = InventoriesHandler.GetInventoryById(targetId);
-                if (inv != null)
+                else if (msi.inventoryId >= shadowInventoryWorldIdEnd)
+                {
+                    targetInventory = InventoriesHandler.GetInventoryById(msi.inventoryId);
+                }
+                if (targetInventory != null)
                 {
                     suppressInventoryChange = true;
                     try
                     {
-                        inv.AutoSort();
+                        targetInventory.AutoSort();
                     }
                     finally
                     {
@@ -857,25 +1004,49 @@ namespace FeatMultiplayer
                             Inventory inventory = InventoriesHandler.CreateNewInventory(component.GetSize(), iid);
                             __instance.SetInventory(inventory);
                             __result = ___inventory;
+                            // This will relink the world object to the generated inventory
+                            WorldObject wo = component.GetComponent<WorldObjectAssociated>()?.GetWorldObject();
+
                             if (updateMode == MultiplayerMode.CoopClient)
                             {
-                                LogInfo("InventoryAssociated_GetInventory: Request host spawn " + iid + ", Size = " + component.GetSize());
-                                Send(new MessageInventorySpawn() { inventoryId = iid });
-                                Signal();
-                                inventorySpawning.Add(iid);
+                                if (iid > 0)
+                                {
+                                    LogInfo("InventoryAssociated_GetInventory: Request host spawn " + iid + ", Size = " + component.GetSize());
+                                    SendHost(new MessageInventorySpawn() { inventoryId = iid }, true);
+                                    inventorySpawning.Add(iid);
+                                }
+                                else
+                                {
+                                    if (wo != null)
+                                    {
+                                        LogInfo("InventoryAssociated_GetInventory: Request host spawn via WorldObject " + wo.GetId() + ", Size = " + component.GetSize());
+                                        SendHost(new MessagePrepareSpawn() { worldObjectId = wo.GetId() }, true);
+                                    }
+                                    else
+                                    {
+                                        LogWarning("InventoryAssociated_GetInventory: Unable to request host spawn for object at " + component.transform.position);
+                                    }
+                                }
                             }
                             else
                             {
+                                iid = ___inventory.GetId();
+
                                 LogInfo("InventoryAssociated_GetInventory: Generating host inventory: " + iid + ", Size = " + component.GetSize());
-                                Send(new MessageInventorySize() { inventoryId = iid, size = component.GetSize() });
-                                Signal();
+                                SendAllClients(new MessageInventorySize() { inventoryId = iid, size = component.GetSize() }, true);
 
                                 List<Group> generatedGroups = component.GetGeneratedGroups();
                                 foreach (Group item in generatedGroups)
                                 {
                                     WorldObject worldObject = WorldObjectsHandler.CreateNewWorldObject(item);
-                                    SendWorldObject(worldObject, false);
+                                    SendWorldObjectToClients(worldObject, false);
                                     inventory.AddItem(worldObject);
+                                }
+
+                                if (wo != null)
+                                {
+                                    wo.SetLinkedInventoryId(iid);
+                                    SendWorldObjectToClients(wo, false);
                                 }
                             }
                         }
@@ -897,7 +1068,7 @@ namespace FeatMultiplayer
 
         static void FindAndGenerateInventoryFromScene(int iid)
         {
-            foreach (var sceneGo in FindObjectsOfType<GameObject>())
+            foreach (var sceneGo in FindObjectsByType<GameObject>(FindObjectsSortMode.None))
             {
                 var sceneInventory = sceneGo.GetComponentInChildren<InventoryFromScene>();
                 if (sceneInventory != null)
@@ -913,13 +1084,12 @@ namespace FeatMultiplayer
                             LogInfo("ReceiveMessageInventorySpawn: InventoryFromScene generated = " + iid + ", Count = " + generatedGroups.Count);
                             Inventory inventory = InventoriesHandler.CreateNewInventory(sceneInventory.GetSize(), iid);
 
-                            Send(new MessageInventorySize() { inventoryId = iid, size = sceneInventory.GetSize() });
-                            Signal();
+                            SendAllClients(new MessageInventorySize() { inventoryId = iid, size = sceneInventory.GetSize() }, true);
 
                             foreach (Group group in generatedGroups)
                             {
                                 WorldObject worldObject = WorldObjectsHandler.CreateNewWorldObject(group, 0);
-                                SendWorldObject(worldObject, false);
+                                SendWorldObjectToClients(worldObject, false);
                                 inventory.AddItem(worldObject);
                             }
                         }
@@ -971,6 +1141,46 @@ namespace FeatMultiplayer
             }
         }
 
+        static void ReceiveMessagePrepareSpawn(MessagePrepareSpawn mps)
+        {
+                var wo = WorldObjectsHandler.GetWorldObjectViaId(mps.worldObjectId);
+            if (wo != null)
+            {
+                var go = wo.GetGameObject();
+                if (go != null)
+                {
+                    if (updateMode == MultiplayerMode.CoopClient)
+                    {
+                        go.AddComponent<WorldUniqueId>().ChangeWorldObjectIdLive(mps.worldObjectId);
+                        go.AddComponent<InventoryFromScene>();
+                    }
+                    else
+                    {
+                        var ia = go.GetComponent<InventoryAssociated>();
+                        if (ia != null)
+                        {
+                            if (ia.GetInventory() == null)
+                            {
+                                LogWarning("MessagePrepareSpawn: World Object " + mps.worldObjectId + " did not spawn any inventory. " + DebugWorldObject(wo));
+                            }
+                        }   
+                        else
+                        {
+                            LogWarning("MessagePrepareSpawn: World Object " + mps.worldObjectId + " does not have an inventory associated. " + DebugWorldObject(wo));
+                        }
+                    }
+                }
+                else
+                {
+                    LogWarning("MessagePrepareSpawn: World Object " + mps.worldObjectId + " is not placed. " + DebugWorldObject(wo));
+                }
+            }
+            else
+            {
+                LogWarning("MessagePrepareSpawn: Unknown World Object " + mps.worldObjectId);
+            }
+        }
+
         static void ReceiveMessageInventorySize(MessageInventorySize mis)
         {
             if (updateMode == MultiplayerMode.CoopClient)
@@ -983,10 +1193,146 @@ namespace FeatMultiplayer
                 }
                 else
                 {
-                    LogInfo("ReceiveMessageInventorySize: Update " + mis.inventoryId + ", size = " + inv.GetSize() + " -> " + mis.size);
-                    inv.SetSize(mis.size);
+                    if (mis.relative)
+                    {
+                        LogInfo("ReceiveMessageInventorySize: Update " + mis.inventoryId + ", size = " + inv.GetSize() + (mis.size >= 0 ? " + " : " - ") + Math.Abs(mis.size) + " = " + (inv.GetSize() + mis.size));
+                        inv.SetSize(inv.GetSize() + mis.size);
+                    }
+                    else
+                    {
+                        LogInfo("ReceiveMessageInventorySize: Update " + mis.inventoryId + ", size = " + inv.GetSize() + " -> " + mis.size);
+                        inv.SetSize(mis.size);
+                    }
                 }
             }
-        } 
+        }
+
+        static void ReceiveMessageEquipmentSwap(MessageEquipmentSwap mes)
+        {
+            equipmentSwapMarker = true;
+            LogInfo("ReceiveMessageEquipmentSwap");
+        }
+
+        /// <summary>
+        /// Tries to create an item in the target inventory and if successful, notifies
+        /// the client about the new WorldObject and the inventory that got changed.
+        /// </summary>
+        /// <param name="group">The item type to create</param>
+        /// <param name="inventory">The target inventory to create into</param>
+        /// <param name="cc">The client whose inventory is targeted or null for all clients</param>
+        /// <param name="worldObjectCreated">The object created</param>
+        /// <returns>True if successful, false if the target inventory is full.</returns>
+        static bool TryCreateInInventoryAndNotify(Group group, Inventory inventory, 
+            ClientConnection cc,
+            out WorldObject worldObjectCreated)
+        {
+            var craftedWo = WorldObjectsHandler.CreateNewWorldObject(group);
+            suppressInventoryChange = true;
+            bool added;
+            try
+            {
+                added = inventory.AddItem(craftedWo);
+            }
+            finally
+            {
+                suppressInventoryChange = false;
+            }
+
+            if (added)
+            {
+                // We need to send the object first, then send the instruction that it has been
+                // Added to the target inventory.
+                SendWorldObjectToClients(craftedWo, false);
+
+                var msg = new MessageInventoryAdded()
+                {
+                    inventoryId = inventory.GetId(),
+                    itemId = craftedWo.GetId(),
+                    groupId = craftedWo.GetGroup().GetId()
+                };
+
+                if (cc != null)
+                {
+                    cc.Send(msg);
+                    cc.Signal();
+                } 
+                else
+                {
+                    SendAllClients(msg, true);
+                }
+                worldObjectCreated = craftedWo;
+                return true;
+            }
+            WorldObjectsHandler.DestroyWorldObject(craftedWo);
+            worldObjectCreated = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Some machines can be set to clear inventory if they are full.
+        /// 
+        /// We don't do this on the client and let the host handle it.
+        /// </summary>
+        /// <returns></returns>
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(MachineDestructInventoryIfFull), "TryToCleanInventory")]
+        static bool MachineDestructInventoryIfFull_TryToCleanInventory()
+        {
+            return updateMode != MultiplayerMode.CoopClient;
+        }
+
+        /// <summary>
+        /// Vanilla calls this when the setting buttons, on the inventory screen, have been clicked.
+        /// 
+        /// We relay this to the other parties.
+        /// </summary>
+        /// <param name="___relatedWorldObject"></param>
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(UiContainerSettingOnOffButton), "OnClickOnOffButtons")]
+        static void UiContainerSettingOnOffButton_OnClickOnOffButtons(WorldObject ___relatedWorldObject)
+        {
+            if (updateMode == MultiplayerMode.CoopHost)
+            {
+                SendWorldObjectToClients(___relatedWorldObject, false);
+            }
+            else
+            {
+                SendWorldObjectToHost(___relatedWorldObject, false);
+            }
+        }
+
+        /// <summary>
+        /// Vanilla calls it during the setting up of the settings button, on the inventory screen.
+        /// 
+        /// We install a tracker so we can update the visuals if the other side changes the settings
+        /// </summary>
+        /// <param name="___relatedWorldObject"></param>
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(UiContainerSettingOnOffButton), "SetUiSettingWorldObject")]
+        static void UiContainerSettingOnOffButton_SetUiSettingWorldObject(UiContainerSettingOnOffButton __instance, 
+            WorldObject ___relatedWorldObject, UiOnOffButtons ___uiOnOffButtons)
+        {
+            if (updateMode != MultiplayerMode.SinglePlayer)
+            {
+                __instance.StartCoroutine(UiContainerSettingOnOffButton_Tracker(___relatedWorldObject, ___uiOnOffButtons, 0.25f));
+            }
+        }
+
+        static IEnumerator UiContainerSettingOnOffButton_Tracker(WorldObject ___relatedWorldObject, 
+            UiOnOffButtons ___uiOnOffButtons, float delay)
+        {
+            for (; ; )
+            {
+                // do not trigger ping-pong updates
+                var save = ___uiOnOffButtons.uiOnOffButtonsClick;
+                ___uiOnOffButtons.uiOnOffButtonsClick = e => { };
+
+                ___uiOnOffButtons.SetStatusOfOnOffButtons(___relatedWorldObject.GetSetting() != 0);
+
+                ___uiOnOffButtons.uiOnOffButtonsClick = save;
+
+                yield return new WaitForSeconds(delay);
+            }
+        }
     }
 }

@@ -4,12 +4,10 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessageInventoryAdded : MessageStringProvider
+    internal class MessageInventoryAdded : MessageInventoryChanged
     {
-        internal int inventoryId;
-        internal int itemId;
         internal string groupId;
 
         internal static bool TryParse(string str, out MessageInventoryAdded mia)
@@ -36,7 +34,7 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
             return "InventoryAdd|" + inventoryId + "|" + itemId + "|" + groupId + "\n";
         }

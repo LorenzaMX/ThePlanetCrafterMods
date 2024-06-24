@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -48,8 +49,15 @@ namespace FeatMultiplayer
                         id = wo.GetId(),
                         color = color
                     };
-                    Send(mut);
-                    Signal();
+
+                    if (updateMode == MultiplayerMode.CoopHost)
+                    {
+                        SendAllClients(mut, true);
+                    }
+                    else
+                    {
+                        SendHost(mut, true);
+                    }
                 });
                 return false;
             }
@@ -71,8 +79,7 @@ namespace FeatMultiplayer
                         // Signal back the client immediately
                         if (updateMode == MultiplayerMode.CoopHost)
                         {
-                            Send(muc);
-                            Signal();
+                            SendAllClients(muc, true);
                         }
                     }
                 }

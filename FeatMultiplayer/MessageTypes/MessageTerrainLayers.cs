@@ -5,9 +5,9 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessageTerrainLayers : MessageStringProvider
+    internal class MessageTerrainLayers : MessageBase
     {
         internal readonly List<MessageTerrainLayer> layers = new();
 
@@ -45,7 +45,7 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
             StringBuilder sb = new StringBuilder();
             sb.Append("TerrainLayers");

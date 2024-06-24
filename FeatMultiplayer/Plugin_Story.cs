@@ -1,12 +1,12 @@
 ﻿using BepInEx;
 using HarmonyLib;
-using MijuTools;
 using SpaceCraft;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -40,15 +40,15 @@ namespace FeatMultiplayer
         /// <param name="_messageData">The new message to be received.</param>
         [HarmonyPrefix]
         [HarmonyPatch(typeof(MessagesHandler), nameof(MessagesHandler.AddNewReceivedMessage))]
-        static void MessagesHandler_AddNewReceivedMessage(MessageData _messageData)
+        static void MessagesHandler_AddNewReceivedMessage(MessageData _messageData, bool _showPopup)
         {
             if (updateMode == MultiplayerMode.CoopHost)
             {
-                Send(new MessageMessageAdd()
+                SendAllClients(new MessageMessageAdd()
                 {
-                    messageId = _messageData.stringId
-                });
-                Signal();
+                    messageId = _messageData.stringId,
+                    showPopup = _showPopup
+                }, true);
             }
         }
 
@@ -62,12 +62,22 @@ namespace FeatMultiplayer
             {
                 mm.messages.Add(m.GetMessageData().stringId);
             }
-            Send(mm);
+            SendAllClients(mm);
         }
 
         static void SendStoryEvents()
         {
             // TODO maybe if there will be other event types in the future (message, meteor).
+            var seh = Managers.GetManager<StoryEventsHandler>();
+
+            var mse = new MessageStoryEvents();
+            mse.eventIds = new();
+
+            foreach (var se in seh.GetTriggeredStoryEvents())
+            {
+                mse.eventIds.Add(se.storyEventData.id);
+            }
+            SendAllClients(mse);
         }
 
         static void ReceiveMessageMessages(MessageMessages mm)
@@ -114,6 +124,24 @@ namespace FeatMultiplayer
             {
                 LogWarning("ReceiveMessageMessageAdd: Unknown message " + mma.messageId);
             }
+        }
+
+        static void ReceiveMessageStoryEvents(MessageStoryEvents mse)
+        {
+            if (updateMode != MultiplayerMode.CoopClient)
+            {
+                return;
+            }
+            var seh = Managers.GetManager<StoryEventsHandler>();
+
+            List<StoryEvent> list = new();
+            foreach (var id in mse.eventIds)
+            {
+                var sed = seh.GetStoryEventDataViaId(id);
+                list.Add(new StoryEvent(sed));
+            }
+
+            seh.SetTriggeredEvents(list);
         }
     }
 }

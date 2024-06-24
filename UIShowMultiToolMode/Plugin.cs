@@ -1,5 +1,7 @@
-﻿using BepInEx;
-using MijuTools;
+﻿// Copyright (c) 2022-2024, David Karnok & Contributors
+// Licensed under the Apache License, Version 2.0
+
+using BepInEx;
 using SpaceCraft;
 using HarmonyLib;
 using UnityEngine;
@@ -9,7 +11,7 @@ using BepInEx.Configuration;
 
 namespace UIShowMultiToolMode
 {
-    [BepInPlugin("akarnokd.theplanetcraftermods.uishowmultitoolmode", "(UI) Show MultiTool Mode", "1.0.0.0")]
+    [BepInPlugin("akarnokd.theplanetcraftermods.uishowmultitoolmode", "(UI) Show MultiTool Mode", PluginInfo.PLUGIN_VERSION)]
     [BepInDependency(uiCraftEquipmentInPlaceGuid, BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
@@ -25,13 +27,15 @@ namespace UIShowMultiToolMode
         static ConfigEntry<int> right;
 
         static GameObject parent;
-        GameObject textBackground;
-        GameObject iconBackground;
-        GameObject textObject;
-        GameObject iconObject;
+        static GameObject textBackground;
+        static GameObject iconBackground;
+        static GameObject textObject;
+        static GameObject iconObject;
 
         private void Awake()
         {
+            LibCommon.BepInExLoggerFix.ApplyFix();
+
             // Plugin startup logic
             Logger.LogInfo($"Plugin is loaded!");
 
@@ -44,6 +48,7 @@ namespace UIShowMultiToolMode
             bottom = Config.Bind("General", "Bottom", 30, "Position of the text from the bottom of the screen");
             right = Config.Bind("General", "Right", 10, "Position of the text from the right of the screen");
 
+            LibCommon.HarmonyIntegrityCheck.Check(typeof(Plugin));
             Harmony.CreateAndPatchAll(typeof(Plugin));
         }
 
@@ -67,14 +72,14 @@ namespace UIShowMultiToolMode
         {
             if (parent == null)
             {
-                parent = new GameObject();
+                parent = new GameObject("MultiToolModeCanvas");
                 Canvas canvas = parent.AddComponent<Canvas>();
                 canvas.renderMode = RenderMode.ScreenSpaceOverlay;
 
                 RectTransform rectTransform;
                 Image image;
                 Text text;
-                Color bgColor = new Color(0, 0, 0, transparencyPercent.Value / 100f);
+                Color bgColor = new(0, 0, 0, transparencyPercent.Value / 100f);
 
                 int s = fontSize.Value;
                 int pad = 10;
@@ -139,45 +144,48 @@ namespace UIShowMultiToolMode
         }
         void Show(PlayerMultitool multitool)
         {
-            iconBackground.SetActive(showIcon.Value);
-            iconObject.SetActive(showIcon.Value);
-
-            textBackground.SetActive(showText.Value);
-            textObject.SetActive(showText.Value);
-
             var state = multitool.GetState();
             var screen = multitool.GetComponentInChildren<MultiToolScreen>();
 
-            switch (state)
+            iconBackground.SetActive(showIcon.Value && screen != null);
+            iconObject.SetActive(showIcon.Value && screen != null);
+
+            textBackground.SetActive(showText.Value && screen != null);
+            textObject.SetActive(showText.Value && screen != null);
+
+            if (screen != null)
             {
-                case DataConfig.MultiToolState.Build:
-                    {
-                        textObject.GetComponent<Text>().text = Localization.GetLocalizedString("GROUP_NAME_MultiBuild");
-                        iconObject.GetComponent<Image>().sprite = screen.illustrationBuild;
-                        break;
-                    }
-                case DataConfig.MultiToolState.Deconstruct:
-                    {
-                        textObject.GetComponent<Text>().text = Localization.GetLocalizedString("GROUP_NAME_MultiDeconstruct");
-                        iconObject.GetComponent<Image>().sprite = screen.illustrationDeconstruct;
-                        break;
-                    }
-                default:
-                    {
-                        textObject.GetComponent<Text>().text = "< none >";
-                        iconObject.GetComponent<Image>().sprite = screen.illustrationDefault;
-                        break;
-                    }
+                switch (state)
+                {
+                    case DataConfig.MultiToolState.Build:
+                        {
+                            textObject.GetComponent<Text>().text = Localization.GetLocalizedString("GROUP_NAME_MultiBuild");
+                            iconObject.GetComponent<Image>().sprite = screen.illustrationBuild;
+                            break;
+                        }
+                    case DataConfig.MultiToolState.Deconstruct:
+                        {
+                            textObject.GetComponent<Text>().text = Localization.GetLocalizedString("GROUP_NAME_MultiDeconstruct");
+                            iconObject.GetComponent<Image>().sprite = screen.illustrationDeconstruct;
+                            break;
+                        }
+                    default:
+                        {
+                            textObject.GetComponent<Text>().text = "< none >";
+                            iconObject.GetComponent<Image>().sprite = screen.illustrationDefault;
+                            break;
+                        }
+                }
             }
         }
 
-        void Teardown()
+        static void Teardown()
         {
-            UnityEngine.Object.Destroy(textBackground);
-            UnityEngine.Object.Destroy(textObject);
-            UnityEngine.Object.Destroy(iconBackground);
-            UnityEngine.Object.Destroy(iconObject);
-            UnityEngine.Object.Destroy(parent);
+            Destroy(textBackground);
+            Destroy(textObject);
+            Destroy(iconBackground);
+            Destroy(iconObject);
+            Destroy(parent);
             parent = null;
             textBackground = null;
             textObject = null;
@@ -186,11 +194,16 @@ namespace UIShowMultiToolMode
         }
 
         [HarmonyPostfix]
-        [HarmonyPatch(typeof(LiveDevTools), nameof(LiveDevTools.ToggleUi))]
-        static void LiveDevTools_ToggleUi(List<GameObject> ___handObjectsToHide)
+        [HarmonyPatch(typeof(VisualsToggler), nameof(VisualsToggler.ToggleUi))]
+        static void VisualsToggler_ToggleUi(List<GameObject> ___uisToHide)
         {
-            bool active = !___handObjectsToHide[0].activeSelf;
+            bool active = ___uisToHide[0].activeSelf;
             parent?.SetActive(active);
+        }
+
+        static void OnModConfigChanged(ConfigEntryBase _)
+        {
+            Teardown();
         }
     }
 }

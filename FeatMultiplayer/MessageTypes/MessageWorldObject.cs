@@ -4,7 +4,7 @@ using System.Globalization;
 using System.Text;
 using UnityEngine;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
     internal class MessageWorldObject
     {
@@ -18,11 +18,12 @@ namespace FeatMultiplayer
         public string text;
         public List<int> panelIds;
         public float growth;
+        public int settings;
         public bool makeGrabable;
 
         internal static void AppendWorldObject(StringBuilder sb, char separator, WorldObject wo, bool makeGrabable)
         {
-            sb.Append(wo.GetId());  // 0
+            sb.Append(wo.GetId().ToString("X"));  // 0
             sb.Append(separator);
             sb.Append(wo.GetGroup().GetId());  // 1
             sb.Append(separator);
@@ -42,24 +43,86 @@ namespace FeatMultiplayer
                 sb.Append(separator);
                 sb.Append(separator);
             }
-            sb.Append(MessageHelper.ColorToString(wo.GetColor())); // 6
+            var c = wo.GetColor();
+            if (c.a != 0 || c.r != 0 || c.g != 0 || c.b != 0)
+            {
+                sb.Append(MessageHelper.ColorToString(c)); // 6
+            }
             sb.Append(separator);
-            sb.Append(wo.GetText()); // 7
+            MessageHelper.EncodeText(wo.GetText(), sb); // 7
             sb.Append(separator);
             sb.Append(DataTreatments.IntListToString(wo.GetPanelsId())); // 8
             sb.Append(separator);
-            sb.Append(wo.GetGrowth().ToString(CultureInfo.InvariantCulture)); // 9
+            if (wo.GetGrowth() != 0)
+            {
+                sb.Append(wo.GetGrowth().ToString(CultureInfo.InvariantCulture)); // 9
+            }
             sb.Append(separator);
-            sb.Append(makeGrabable ? 1 : 0); // 10
+            var set = wo.GetSetting();
+            sb.Append(set > 0 ? set : "");
+            sb.Append(separator);
+            sb.Append(makeGrabable ? "1" : ""); // 10
+        }
+
+        internal static void AppendWorldObject(StringBuilder sb, char separator, MessageWorldObject wo, bool makeGrabable)
+        {
+            sb.Append(wo.id.ToString("X"));  // 0
+            sb.Append(separator);
+            sb.Append(wo.groupId);  // 1
+            sb.Append(separator);
+            sb.Append(wo.inventoryId);  // 2
+            sb.Append(separator);
+            if (wo.groupIds != null && wo.groupIds.Length != 0)
+            {
+                for (int i = 0; i < wo.groupIds.Length; i++)
+                {
+                    if (i != 0)
+                    {
+                        sb.Append(',');
+                    }
+                    string g = wo.groupIds[i];
+                    sb.Append(g);
+                }
+            }
+            sb.Append(separator);
+            if (wo.position != Vector3.zero)
+            {
+                sb.Append(DataTreatments.Vector3ToString(wo.position)); // 4
+                sb.Append(separator);
+                sb.Append(DataTreatments.QuaternionToString(wo.rotation)); // 5
+                sb.Append(separator);
+            }
+            else
+            {
+                sb.Append(separator);
+                sb.Append(separator);
+            }
+            if (wo.color.a != 0 || wo.color.r != 0 || wo.color.g != 0 || wo.color.b != 0)
+            {
+                sb.Append(MessageHelper.ColorToString(wo.color)); // 6
+            }
+            sb.Append(separator);
+            MessageHelper.EncodeText(wo.text, sb); // 7
+            sb.Append(separator);
+            sb.Append(DataTreatments.IntListToString(wo.panelIds)); // 8
+            sb.Append(separator);
+            if (wo.growth != 0)
+            {
+                sb.Append(wo.growth.ToString(CultureInfo.InvariantCulture)); // 9
+            }
+            sb.Append(separator);
+            sb.Append(wo.settings > 0 ? wo.settings : "");
+            sb.Append(separator);
+            sb.Append(makeGrabable ? "1" : ""); // 10
         }
 
         internal static bool TryParse(string[] objs, int offset, out MessageWorldObject mwo)
         {
-            if (objs.Length - offset == 11)
+            if (objs.Length - offset == 12)
             {
                 mwo = new MessageWorldObject();
 
-                mwo.id = int.Parse(objs[offset + 0]);
+                mwo.id = int.Parse(objs[offset + 0], NumberStyles.HexNumber);
                 mwo.groupId = objs[offset + 1];
                 mwo.inventoryId = int.Parse(objs[offset + 2]);
                 if (objs[offset + 3].Length > 0)
@@ -73,7 +136,7 @@ namespace FeatMultiplayer
                 mwo.position = DataTreatments.StringToVector3(objs[offset + 4]);
                 mwo.rotation = DataTreatments.StringToQuaternion(objs[offset + 5]);
                 mwo.color = MessageHelper.StringToColor(objs[offset + 6]);
-                mwo.text = objs[offset + 7];
+                mwo.text = MessageHelper.DecodeText(objs[offset + 7]);
 
                 mwo.panelIds = new();
                 if (objs[offset + 8].Length > 0)
@@ -86,13 +149,20 @@ namespace FeatMultiplayer
                     }
                 }
 
-                mwo.growth = float.Parse(objs[offset + 9], CultureInfo.InvariantCulture);
-                mwo.makeGrabable = "1" == objs[offset + 10];
+                if (objs[offset + 9].Length != 0)
+                {
+                    mwo.growth = float.Parse(objs[offset + 9], CultureInfo.InvariantCulture);
+                }
+                if (objs[offset + 10].Length != 0)
+                {
+                    mwo.settings = int.Parse(objs[offset + 10], CultureInfo.InvariantCulture);
+                }
+                mwo.makeGrabable = "1" == objs[offset + 11];
                 return true;
             } 
             else
             {
-                Plugin.LogWarning("Invalid MessageWorldObject: " + objs.Length + " | " + offset);
+                Plugin.LogWarning("Invalid MessageWorldObject: " + objs.Length + " | " + offset + "\n" + string.Join("|", objs));
             }
             mwo = null;
             return false;

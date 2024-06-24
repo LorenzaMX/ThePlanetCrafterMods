@@ -2,7 +2,6 @@
 using UnityEngine;
 using System;
 using UnityEngine.InputSystem;
-using MijuTools;
 using SpaceCraft;
 
 namespace FeatMultiplayer
@@ -10,10 +9,12 @@ namespace FeatMultiplayer
     /// <summary>
     /// Multiplayer mod.
     /// </summary>
-    [BepInPlugin(modFeatMultiplayerGuid, "(Feat) Multiplayer", "0.1.0.25")]
+    [BepInPlugin(modFeatMultiplayerGuid, "(Feat) Multiplayer", PluginInfo.PLUGIN_VERSION)]
     [BepInDependency(modCheatInventoryStackingGuid, BepInDependency.DependencyFlags.SoftDependency)]
     [BepInDependency(modCheatMachineRemoteDepositGuid, BepInDependency.DependencyFlags.SoftDependency)]
     [BepInDependency(modCheatAutoHarvestGuid, BepInDependency.DependencyFlags.SoftDependency)]
+    [BepInDependency(LibCommon.CraftHelper.modCraftFromContainersGuid, BepInDependency.DependencyFlags.SoftDependency)]
+
     public partial class Plugin : BaseUnityPlugin
     {
         const string modFeatMultiplayerGuid = "akarnokd.theplanetcraftermods.featmultiplayer";
@@ -51,11 +52,6 @@ namespace FeatMultiplayer
         static float lastSmallSync;
 
         /// <summary>
-        /// The player's avatar, also doubles as the other player presence indicator.
-        /// </summary>
-        internal static PlayerAvatar otherPlayer;
-
-        /// <summary>
         /// The main update, called by Unity on each frame.
         /// </summary>
         void Update()
@@ -68,27 +64,37 @@ namespace FeatMultiplayer
             if (updateMode == MultiplayerMode.CoopHost || updateMode == MultiplayerMode.CoopClient)
             {
                 DoMultiplayerUpdate();
-                /* */
-                if (otherPlayer != null && Keyboard.current.tKey.wasPressedThisFrame)
+                var ap = GetPlayerMainController();
+                WindowsHandler wh = Managers.GetManager<WindowsHandler>();
+                if (ap != null && wh != null && !wh.GetHasUiOpen() && ap.GetPlayerInputDispatcher().IsPressingAccessibilityKey())
                 {
-                    LogInfo("Teleporting to the other player");
-                    var apc = GetPlayerMainController();
-                    apc.SetPlayerPlacement(otherPlayer.avatar.transform.position, apc.transform.rotation);
-                }
-                if (updateMode == MultiplayerMode.CoopHost && Keyboard.current.iKey.wasPressedThisFrame)
-                {
-                    SetupHostInventory();
-                }
-                if (updateMode == MultiplayerMode.CoopHost && Keyboard.current.pKey.wasPressedThisFrame)
-                {
-                    LaunchAllMeteorEvents();
-                }
+                    /*
+                    FIXME Which player?
+                    if (otherPlayer != null && Keyboard.current.tKey.wasPressedThisFrame)
+                    {
+                        LogInfo("Teleporting to the other player");
+                        var apc = GetPlayerMainController();
+                        apc.SetPlayerPlacement(otherPlayer.avatar.transform.position, apc.transform.rotation);
+                    }
+                     */
+                    if (updateMode == MultiplayerMode.CoopHost && Keyboard.current.iKey.wasPressedThisFrame)
+                    {
+                        SetupHostInventory();
+                    }
+                    if (updateMode == MultiplayerMode.CoopHost && Keyboard.current.pKey.wasPressedThisFrame)
+                    {
+                        LaunchAllMeteorEvents();
+                    }
 
-                if (Keyboard.current.hKey.wasPressedThisFrame)
-                {
-                    ToggleConsumption();
+                    if (Keyboard.current.hKey.wasPressedThisFrame)
+                    {
+                        ToggleConsumption();
+                    }
+                    CheckLogKeys();
                 }
-                CheckLogKeys();
+                HandleEmoting();
+
+                HandleOverlays();
             }
             else
             {
@@ -127,7 +133,7 @@ namespace FeatMultiplayer
         {
             var now = Time.realtimeSinceStartup;
 
-            if (updateMode == MultiplayerMode.CoopHost && otherPlayer != null)
+            if (updateMode == MultiplayerMode.CoopHost && !_clientConnections.IsEmpty)
             {
                 try
                 {
@@ -150,14 +156,10 @@ namespace FeatMultiplayer
             if (now - lastNeworkSync >= 1f / networkFrequency.Value)
             {
                 lastNeworkSync = now;
-                // TODO send out state messages
-                if (otherPlayer != null)
-                {
-                    SendPlayerLocation();
-                }
+                SendPlayerLocation();
 
                 // Receive and apply commands
-                while (receiveQueue.TryDequeue(out var message))
+                while (_receiveQueue.TryDequeue(out var message))
                 {
                     try
                     {

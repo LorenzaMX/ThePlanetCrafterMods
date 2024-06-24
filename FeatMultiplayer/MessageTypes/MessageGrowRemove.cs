@@ -4,9 +4,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessageGrowRemove : MessageStringProvider
+    internal class MessageGrowRemove : MessageBase
     {
         internal int machineId;
         internal int spawnId;
@@ -32,7 +32,7 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
             return "GrowRemove|"
                 + machineId

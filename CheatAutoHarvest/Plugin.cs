@@ -1,5 +1,7 @@
-﻿using BepInEx;
-using MijuTools;
+﻿// Copyright (c) 2022-2024, David Karnok & Contributors
+// Licensed under the Apache License, Version 2.0
+
+using BepInEx;
 using SpaceCraft;
 using HarmonyLib;
 using UnityEngine;
@@ -7,394 +9,264 @@ using System.Collections;
 using System.Collections.Generic;
 using BepInEx.Configuration;
 using System;
-using System.Reflection;
 using BepInEx.Logging;
-using BepInEx.Bootstrap;
-using System.Diagnostics;
+using Unity.Netcode;
+using LibCommon;
 
 namespace CheatAutoHarvest
 {
-    [BepInPlugin(modCheatAutoHarvest, "(Cheat) Automatically Harvest Food n Algae", "1.0.0.5")]
-    [BepInDependency(modCheatInventoryStackingGuid, BepInDependency.DependencyFlags.SoftDependency)]
+    [BepInPlugin(modCheatAutoHarvest, "(Cheat) Automatically Harvest Food n Algae", PluginInfo.PLUGIN_VERSION)]
     public class Plugin : BaseUnityPlugin
     {
-        const string modCheatInventoryStackingGuid = "akarnokd.theplanetcraftermods.cheatinventorystacking";
         const string modCheatAutoHarvest = "akarnokd.theplanetcraftermods.cheatautoharvest";
 
-        static MethodInfo updateGrowing;
-        static MethodInfo instantiateAtRandomPosition;
-        static FieldInfo machineGrowerInventory;
-        static FieldInfo worldObjectsDictionary;
+        static Plugin me;
 
         static ManualLogSource logger;
-        static bool debugAlgae = false;
-        static bool debugFood = false;
+        static ConfigEntry<bool> debugAlgae;
+        static ConfigEntry<bool> debugFood;
 
         static ConfigEntry<bool> harvestAlgae;
         static ConfigEntry<bool> harvestFood;
 
-        static Func<List<WorldObject>, int, string, bool> isFullStacked;
+        static readonly Dictionary<string, ConfigEntry<string>> depositAliases = [];
 
-        static bool loadCompleted;
-
-        /// <summary>
-        /// Set this callback and make it return false to prevent this mod from working.
-        /// </summary>
-        public static Func<bool> canExecute;
+        static Coroutine machineGrowerRoutine;
 
         private void Awake()
         {
+            LibCommon.BepInExLoggerFix.ApplyFix();
+
             // Plugin startup logic
             Logger.LogInfo($"Plugin is loaded!");
 
+            me = this;
+
             logger = Logger;
-            updateGrowing = AccessTools.Method(typeof(MachineOutsideGrower), "UpdateGrowing", new Type[] { typeof(float) });
-            instantiateAtRandomPosition = AccessTools.Method(typeof(MachineOutsideGrower), "InstantiateAtRandomPosition", new Type[] { typeof(GameObject), typeof(bool) });
-            machineGrowerInventory = AccessTools.Field(typeof(MachineGrower), "inventory");
-            worldObjectsDictionary = AccessTools.Field(typeof(WorldObjectsHandler), "worldObjects");
             harvestAlgae = Config.Bind("General", "HarvestAlgae", true, "Enable auto harvesting for algae.");
             harvestFood = Config.Bind("General", "HarvestFood", true, "Enable auto harvesting for food.");
+            debugAlgae = Config.Bind("General", "DebugAlgae", false, "Enable debug log for algae (chatty!)");
+            debugFood = Config.Bind("General", "DebugFood", false, "Enable debug log for food (chatty!)");
 
-            if (Chainloader.PluginInfos.TryGetValue(modCheatInventoryStackingGuid, out BepInEx.PluginInfo pi))
+            depositAliases["Algae1Seed"] = Config.Bind("General", "AliasAlgae", "*Algae1Seed", "The container name to put algae into.");
+            depositAliases["Vegetable0Growable"] = Config.Bind("General", "AliasEggplant", "*Vegetable0Growable", "The container name to put eggplant into.");
+            depositAliases["Vegetable1Growable"] = Config.Bind("General", "AliasSquash", "*Vegetable1Growable", "The container name to put squash into.");
+            depositAliases["Vegetable2Growable"] = Config.Bind("General", "AliasBeans", "*Vegetable2Growable", "The container name to put beans into.");
+            depositAliases["Vegetable3Growable"] = Config.Bind("General", "AliasMushroom", "*Vegetable3Growable", "The container name to put mushroom into.");
+            depositAliases["CookCocoaGrowable"] = Config.Bind("General", "AliasCocoa", "*CookCocoaGrowable", "The container name to put cocoa into.");
+            depositAliases["CookWheatGrowable"] = Config.Bind("General", "AliasWheat", "*CookWheatGrowable", "The container name to put wheat into.");
+
+            if (debugAlgae.Value || debugFood.Value)
             {
-                MethodInfo mi = AccessTools.Method(pi.Instance.GetType(), "IsFullStacked", new Type[] { typeof(List<WorldObject>), typeof(int), typeof(string) });
-                isFullStacked = AccessTools.MethodDelegate<Func<List<WorldObject>, int, string, bool>>(mi, pi.Instance);
+                foreach (var kv in depositAliases) 
+                {
+                    Logger.LogInfo("  Alias " + kv.Key + " -> " + kv.Value.Value);
+                }
             }
 
-            Harmony.CreateAndPatchAll(typeof(Plugin));
+            LibCommon.HarmonyIntegrityCheck.Check(typeof(Plugin));
+            var harmony = Harmony.CreateAndPatchAll(typeof(Plugin));
+            LibCommon.SaveModInfo.Patch(harmony);
+            LibCommon.ModPlanetLoaded.Patch(harmony, modCheatAutoHarvest, _ => PlanetLoader_HandleDataAfterLoad());
         }
 
-        static void logAlgae(string s)
+        static void LogAlgae(string s)
         {
-            if (debugAlgae)
+            if (debugAlgae.Value)
             {
                 logger.LogInfo(s);
             }
         }
-        static void logFood(string s)
+        static void LogFood(string s)
         {
-            if (debugFood)
+            if (debugFood.Value)
             {
                 logger.LogInfo(s);
             }
         }
 
-        static List<InventoryAndWorldObject> inventoriesCache;
-        static int inventoriesCacheFrame;
-
-        [HarmonyPostfix]
-        [HarmonyPatch(typeof(MachineOutsideGrower), "Grow")]
-        static void MachineOutsideGrower_Grow(
-            MachineOutsideGrower __instance, 
-            float ___growSize,
-            WorldObject ___worldObjectGrower, 
-            List<GameObject> ___instantiatedGameObjects,
-            float ___updateInterval,
-            int ___spawNumber)
+        static void PlanetLoader_HandleDataAfterLoad()
         {
-            if (!harvestAlgae.Value || (canExecute != null && !canExecute.Invoke()))
+            if (machineGrowerRoutine != null)
             {
-                return;
+                me.StopCoroutine(machineGrowerRoutine);
+                machineGrowerRoutine = null;
             }
-            if (!loadCompleted)
-            {
-                logAlgae("Algae: Game is still loading.");
-                inventoriesCache = null;
-                inventoriesCacheFrame = 0;
-                return;
-            }
-            logAlgae("Algae: Ingame?");
-            if (Managers.GetManager<PlayersManager>() == null)
-            {
-                return;
-            }
-            if (___instantiatedGameObjects != null)
-            {
-                bool restartCoroutine = false;
-
-                List<InventoryAndWorldObject> inventories = inventoriesCache;
-                int frame = inventoriesCacheFrame;
-                int currentFrame = Time.frameCount;
-                if (inventories == null || frame != currentFrame)
-                {
-                    inventories = new List<InventoryAndWorldObject>();
-                    FindInventories(inventories);
-                    
-                    inventoriesCache = inventories;
-                    inventoriesCacheFrame = currentFrame;
-                }
-
-                logAlgae("Grower: " + ___worldObjectGrower.GetId() + " @ " + ___worldObjectGrower.GetGrowth() + " - " + ___instantiatedGameObjects.Count + " < " + ___spawNumber);
-                foreach (GameObject go in new List<GameObject>(___instantiatedGameObjects))
-                {
-                    if (go != null)
-                    {
-                        ActionGrabable ag = go.GetComponent<ActionGrabable>();
-                        if (ag != null)
-                        {
-                            WorldObjectAssociated woa = go.GetComponent<WorldObjectAssociated>();
-                            if (woa != null)
-                            {
-                                WorldObject wo = woa.GetWorldObject();
-                                if (wo != null)
-                                {
-                                    float progress = 100f * go.transform.localScale.x / ___growSize;
-                                    logAlgae("  - [" + wo.GetId() + "]  "  + wo.GetGroup().GetId() + " @ " + (progress) + "%");
-                                    if (progress >= 100f)
-                                    {
-                                        if (FindInventory(wo, inventories, out Inventory inv))
-                                        {
-                                            if (inv.AddItem(wo))
-                                            {
-                                                logAlgae("    Deposited [" + wo.GetId() + "]  *" + wo.GetGroup().GetId());
-                                                wo.SetDontSaveMe(false);
-
-                                                ___instantiatedGameObjects.Remove(go);
-                                                UnityEngine.Object.Destroy(go);
-
-                                                // from OnGrabedAGrowing to avoid reentrance
-
-                                                GroupItem growableGroup = ((GroupItem)wo.GetGroup()).GetGrowableGroup();
-                                                GameObject objectToInstantiate = (growableGroup != null) ? growableGroup.GetAssociatedGameObject() : wo.GetGroup().GetAssociatedGameObject();
-                                                instantiateAtRandomPosition.Invoke(__instance, new object[] { objectToInstantiate, false });
-
-                                                restartCoroutine = true;
-                                            }
-                                            else
-                                            {
-                                                logAlgae("    Inventory full [" + wo.GetId() + "]  *" + wo.GetGroup().GetId());
-                                            }
-                                        }
-                                        else
-                                        {
-                                            logAlgae("    No inventory for [" + wo.GetId() + "]  *" + wo.GetGroup().GetId());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                logAlgae("Grower: " + ___worldObjectGrower.GetId() + " @ " + ___worldObjectGrower.GetGrowth() + " - " + ___instantiatedGameObjects.Count + " ---- DONE");
-
-                if (restartCoroutine)
-                {
-                    __instance.StopAllCoroutines();
-                    __instance.StartCoroutine((IEnumerator)updateGrowing.Invoke(__instance, new object[] { ___updateInterval }));
-                }
-            }
-        }
-
-        void Start()
-        {
-            StartCoroutine(CheckFoodGrowersLoop(5));
-        }
-
-        IEnumerator CheckFoodGrowersLoop(float delay)
-        {
-            for (; ; )
-            {
-                var t = Stopwatch.GetTimestamp();
-                CheckFoodGrowers();
-                logFood("Perf: " + (Stopwatch.GetTimestamp() - t) / 10000f);
-                yield return new WaitForSeconds(delay);
-            }
-        }
-
-        void CheckFoodGrowers()
-        {
-            if (!harvestFood.Value || (canExecute != null && !canExecute.Invoke()))
-            {
-                return;
-            }
-            if (!loadCompleted)
-            {
-                logFood("Algae: Game is still loading.");
-                return;
-            }
-            logFood("Edible: Ingame?");
-            if (Managers.GetManager<PlayersManager>() == null)
-            {
-                return;
-            }
-
-            logFood("Edible: begin search");
-            int deposited = 0;
-            Dictionary<WorldObject, GameObject> map = (Dictionary<WorldObject, GameObject>)worldObjectsDictionary.GetValue(null);
-
-            List<MachineGrower> allMachineGrowers = new List<MachineGrower>();
-            List<WorldObject> food = new List<WorldObject>();
-            List<InventoryAndWorldObject> inventories = new List<InventoryAndWorldObject>();
-
-            FindObjects(map, food, inventories, allMachineGrowers);
-            logFood("  Enumerated food: " + food.Count);
-            logFood("  Enumerated inventories: " + inventories.Count);
-            logFood("  Enumerated machine growers: " + allMachineGrowers.Count);
-
-            foreach (WorldObject wo in food)
-            {
-                Group g = wo.GetGroup();
-                logFood("Edible for grab: " + wo.GetId() + " of *" + g.id);
-                if (FindInventory(wo, inventories, out Inventory inv))
-                {
-                    logFood("  Found inventory.");
-
-                    bool found = false;
-                    // we have to find which grower wo came from so it can be reset
-                    foreach (MachineGrower mg in allMachineGrowers)
-                    {
-                        if ((wo.GetPosition() - mg.spawnPoint.transform.position).magnitude < 0.2f)
-                        {
-                            found = true;
-                            logFood("  Found MachineGrower");
-                            if (inv.AddItem(wo))
-                            {
-                                logFood("  Adding to target inventory");
-                                if (map.TryGetValue(wo, out GameObject go) && go != null)
-                                {
-                                    UnityEngine.Object.Destroy(go);
-                                }
-
-                                // readd seed
-                                Inventory machineInventory = (Inventory)machineGrowerInventory.GetValue(mg);
-
-                                WorldObject seed = machineInventory.GetInsideWorldObjects()[0];
-
-                                machineInventory.RemoveItem(seed, false);
-                                seed.SetLockInInventoryTime(0f);
-                                machineInventory.AddItem(seed);
-
-                                deposited++;
-                            }
-                            else
-                            {
-                                logAlgae("    Inventory full [" + wo.GetId() + "]  *" + wo.GetGroup().GetId());
-                            }
-
-                            break;
-                        }
-                    }
-                    if (!found)
-                    {
-                        logFood("  Could not find MachineGrower of this edible");
-                    }
-                }
-            }
-            logFood("Edible deposited: " + deposited);
-        }
-
-        static bool IsFull(Inventory inv, WorldObject wo)
-        {
-            if (isFullStacked != null)
-            {
-                return isFullStacked.Invoke(inv.GetInsideWorldObjects(), inv.GetSize(), wo.GetGroup().GetId());
-            }
-            return inv.IsFull();
-        }
-
-        class InventoryAndWorldObject
-        {
-            internal Inventory inventory;
-            internal WorldObject worldObject;
-        }
-
-        static void FindInventories(List<InventoryAndWorldObject> inventories)
-        {
-            foreach (WorldObject wo in WorldObjectsHandler.GetAllWorldObjects())
-            {
-                string txt = wo.GetText();
-                if (txt != null && txt.Contains("*"))
-                {
-                    if (wo.HasLinkedInventory())
-                    {
-                        Inventory inv = InventoriesHandler.GetInventoryById(wo.GetLinkedInventoryId());
-                        if (inv != null)
-                        {
-                            InventoryAndWorldObject iwo = new InventoryAndWorldObject();
-                            iwo.inventory = inv;
-                            iwo.worldObject = wo;
-                            inventories.Add(iwo);
-                        }
-                    }
-                }
-            }
-        }
-        static void FindObjects(Dictionary<WorldObject, GameObject> map, 
-            List<WorldObject> food, 
-            List<InventoryAndWorldObject> inventories, 
-            List<MachineGrower> growers)
-        {
-            foreach (WorldObject wo in WorldObjectsHandler.GetAllWorldObjects())
-            {
-                GroupItem g = wo.GetGroup() as GroupItem;
-                if (g != null && g.GetUsableType() == DataConfig.UsableType.Eatable)
-                {
-                    if (map.TryGetValue(wo, out GameObject go) && go != null)
-                    {
-                        ActionGrabable ag = go.GetComponent<ActionGrabable>();
-                        if (ag != null)
-                        {
-                            food.Add(wo);
-                        }
-                    }
-                }
-                string txt = wo.GetText();
-                if (txt != null && txt.Contains("*"))
-                {
-                    if (wo.HasLinkedInventory())
-                    {
-                        Inventory inv = InventoriesHandler.GetInventoryById(wo.GetLinkedInventoryId());
-                        if (inv != null)
-                        {
-                            InventoryAndWorldObject iwo = new InventoryAndWorldObject();
-                            iwo.inventory = inv;
-                            iwo.worldObject = wo;
-                            inventories.Add(iwo);
-                        }
-                    }
-                }
-                if (map.TryGetValue(wo, out GameObject goConstr) && goConstr != null)
-                {
-                    MachineGrower goMg = goConstr.GetComponent<MachineGrower>();
-                    if (goMg != null)
-                    {
-                        growers.Add(goMg);
-                    }
-                }
-            }
-        }
-
-        static bool FindInventory(WorldObject wo, List<InventoryAndWorldObject> inventories, out Inventory inventory)
-        {
-            string gid = "*" + wo.GetGroup().GetId().ToLower();
-            foreach (InventoryAndWorldObject inv in inventories)
-            {
-                string txt = inv.worldObject.GetText();
-                if (txt != null && txt.ToLower().Contains(gid))
-                {
-                    if (!IsFull(inv.inventory, wo))
-                    {
-                        inventory = inv.inventory;
-                        return true;
-                    }
-                }
-            }
-            inventory = null;
-            return false;
-        }
-
-        [HarmonyPostfix]
-        [HarmonyPatch(typeof(SessionController), "Start")]
-        static void SessionController_Start()
-        {
-            loadCompleted = true;
+            machineGrowerRoutine = me.StartCoroutine(HarvestLoop());
         }
 
         [HarmonyPostfix]
         [HarmonyPatch(typeof(UiWindowPause), nameof(UiWindowPause.OnQuit))]
         static void UiWindowPause_OnQuit()
         {
-            loadCompleted = false;
+            if (machineGrowerRoutine != null)
+            {
+                me.StopCoroutine(machineGrowerRoutine);
+                machineGrowerRoutine = null;
+            }
+            // So they don't have stale items between reloads
+            WorldObjectsHandler.Instance.GetPickablesByDronesWorldObjects().Clear();
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(BlackScreen), nameof(BlackScreen.DisplayLogoStudio))]
+        static void BlackScreen_DisplayLogoStudio()
+        {
+            UiWindowPause_OnQuit();
+        }
+
+        static IEnumerator HarvestLoop()
+        {
+            var wait = new WaitForSeconds(2.5f);
+
+            for (; ; )
+            {
+                if ((harvestFood.Value || harvestAlgae.Value)
+                    && (NetworkManager.Singleton?.IsServer ?? false)
+                    && Managers.GetManager<PlayersManager>()?.GetActivePlayerController() != null
+                )
+                {
+                    DoHarvest();
+                }
+                yield return wait;
+            }
+        }
+
+        static void DoHarvest()
+        {
+            var pickables = WorldObjectsHandler.Instance.GetPickablesByDronesWorldObjects();
+            foreach (var wo in new List<WorldObject>(pickables))
+            {
+                if (wo.GetIsPlaced())
+                {
+                    var gid = wo.GetGroup().GetId();
+
+                    Action<string> log = gid.StartsWith("Algae") ? LogAlgae : LogFood;
+
+                    if ((gid.StartsWith("Algae") && gid.EndsWith("Seed") && harvestAlgae.Value)
+                        || (gid.StartsWith("Vegetable") && gid.EndsWith("Growable") && harvestFood.Value)
+                        || (gid.StartsWith("Cook") && gid.EndsWith("Growable") && harvestFood.Value)
+                    )
+                    {
+                        var ag = wo.GetGameObject().AsNullable()?.GetComponentInChildren<ActionGrabable>();
+
+                        if (ag != null && !GrabChecker.IsOnDisplay(ag) && ag.GetCanGrab())
+                        {
+                            var wo1 = wo;
+                            new DeferredDepositor()
+                            {
+                                inventory = FindInventoryFor(gid),
+                                worldObject = wo,
+                                logger = log,
+                                OnDepositSuccess = () =>
+                                {
+                                    var call = ag.grabedEvent;
+                                    ag.grabedEvent = null;
+                                    call?.Invoke(wo1, false);
+                                }
+                            }.Drain();
+                        }
+                    }
+                    else
+                    {
+                        log("Not grabbable: " + DebugWorldObject(wo));
+                    }
+                }
+            }
+        }
+
+        static IEnumerator<Inventory> FindInventoryFor(string gid)
+        {
+            var containerName = gid;
+            if (depositAliases.TryGetValue(gid, out var alias))
+            {
+                containerName = alias.Value;
+            }
+            foreach (var candidate in WorldObjectsHandler.Instance.GetConstructedWorldObjects())
+            {
+                var txt = candidate.GetText();
+                if (txt != null && txt.Contains(containerName, StringComparison.InvariantCultureIgnoreCase))
+                {
+                    var iid = candidate.GetLinkedInventoryId();
+                    if (iid != 0)
+                    {
+                        var inv = InventoriesHandler.Instance.GetInventoryById(iid);
+                        if (inv != null)
+                        {
+                            yield return inv;
+                        }
+                    }
+                }
+            }
+        }
+
+        static string DebugWorldObject(WorldObject wo)
+        {
+            var str = wo.GetId() + ", " + wo.GetGroup().GetId();
+            var txt = wo.GetText();
+            if (!string.IsNullOrEmpty(txt))
+            {
+                str += ", \"" + txt + "\"";
+            }
+            str += ", " + (wo.GetIsPlaced() ? wo.GetPosition() : "");
+            return str;
+        }
+
+        internal class DeferredDepositor
+        {
+            internal IEnumerator<Inventory> inventory;
+            internal WorldObject worldObject;
+            internal Action<string> logger;
+            internal Action OnDepositSuccess;
+
+            Inventory current;
+            int wip;
+
+            internal void Drain()
+            {
+                if (wip++ != 0)
+                {
+                    return;
+                }
+
+                for (; ; )
+                {
+                    if (current == null)
+                    {
+                        if (inventory.MoveNext())
+                        {
+                            current = inventory.Current;
+                        }
+                        else
+                        {
+                            logger?.Invoke("No suitable non-full inventory found for " + DebugWorldObject(worldObject));
+                            break;
+                        }
+                        // FIXME grabbed: true ???
+                        InventoriesHandler.Instance.AddWorldObjectToInventory(worldObject, inventory.Current, grabbed: false, OnInventoryCallback);
+                    }
+
+                    if (--wip == 0)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            void OnInventoryCallback(bool success)
+            {
+                if (success)
+                {
+                    logger?.Invoke("Inventory " + current.GetId() + " <- " + DebugWorldObject(worldObject));
+                    current = null;
+                    OnDepositSuccess?.Invoke();
+                }
+                else
+                {
+                    current = null;
+                    Drain();
+                }
+            }
         }
     }
 }

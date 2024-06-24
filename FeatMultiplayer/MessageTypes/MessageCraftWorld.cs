@@ -7,9 +7,9 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessageCraftWorld : MessageStringProvider
+    internal class MessageCraftWorld : MessageBase
     {
         internal string groupId;
         internal Vector3 position;
@@ -36,7 +36,7 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
             return "CraftWorld|" + groupId
                 + "|" + DataTreatments.Vector3ToString(position)

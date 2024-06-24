@@ -1,6 +1,5 @@
 ﻿using BepInEx;
 using HarmonyLib;
-using MijuTools;
 using SpaceCraft;
 using System;
 using System.Collections;
@@ -10,6 +9,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -57,11 +57,10 @@ namespace FeatMultiplayer
                     LogWarning("fullPhaseTimeReached: " + AccessTools.Field(typeof(EnvironmentDayNightCycle), "fullPhaseTimeReached").GetValue(__instance));
                     LogWarning("previousLerpValue: " + AccessTools.Field(typeof(EnvironmentDayNightCycle), "previousLerpValue").GetValue(__instance));
                     */
-                    Send(new MessageTime()
+                    SendAllClients(new MessageTime()
                     {
                         time = dn
-                    });
-                    Signal();
+                    }, true);
                 }
                 else
                 if (updateMode == MultiplayerMode.CoopClient)
@@ -103,8 +102,7 @@ namespace FeatMultiplayer
                 mtl.layers.Add(layer);
             }
             LogInfo("SendTerrainLayers: " + mtl.layers.Count);
-            Send(mtl);
-            Signal();
+            SendAllClients(mtl, true);
         }
 
         static void ReceiveMessageTerrainLayers(MessageTerrainLayers mtl)
@@ -125,20 +123,25 @@ namespace FeatMultiplayer
                     layer.colorBaseLerp, 
                     layer.colorCustomLerp);
             }
-            manager.FinishTerrainLayersSetup();
+            var m = AccessTools.Method(typeof(TerrainVisualsHandler), "SetTerrainsColorsFromDb");
+            m.Invoke(manager, new object[0]);
         }
 
         static void SendTerraformState()
         {
-            MessageTerraformState mts = new MessageTerraformState();
+            MessageTerraformState mts = new();
 
             WorldUnitsHandler wuh = Managers.GetManager<WorldUnitsHandler>();
             mts.oxygen = wuh.GetUnit(DataConfig.WorldUnitType.Oxygen).GetValue();
             mts.heat = wuh.GetUnit(DataConfig.WorldUnitType.Heat).GetValue();
             mts.pressure = wuh.GetUnit(DataConfig.WorldUnitType.Pressure).GetValue();
-            mts.biomass = wuh.GetUnit(DataConfig.WorldUnitType.Biomass).GetValue();
+            mts.plants = wuh.GetUnit(DataConfig.WorldUnitType.Plants).GetValue();
+            mts.insects = wuh.GetUnit(DataConfig.WorldUnitType.Insects).GetValue();
+            mts.animals = wuh.GetUnit(DataConfig.WorldUnitType.Animals).GetValue();
+            mts.tokens = TokensHandler.GetTokensNumber();
+            mts.tokensAllTime = TokensHandler.GetAllTimeTokensNumber();
 
-            _sendQueue.Enqueue(mts);
+            SendAllClients(mts);
         }
 
         /// <summary>
@@ -189,22 +192,32 @@ namespace FeatMultiplayer
                     {
                         worldUnitCurrentTotalValue.SetValue(wu, mts.pressure);
                     }
+                    if (wu.GetUnitType() == DataConfig.WorldUnitType.Plants)
+                    {
+                        worldUnitCurrentTotalValue.SetValue(wu, mts.plants);
+                    }
+                    if (wu.GetUnitType() == DataConfig.WorldUnitType.Insects)
+                    {
+                        worldUnitCurrentTotalValue.SetValue(wu, mts.insects);
+                    }
+                    if (wu.GetUnitType() == DataConfig.WorldUnitType.Animals)
+                    {
+                        worldUnitCurrentTotalValue.SetValue(wu, mts.animals);
+                    }
                     if (wu.GetUnitType() == DataConfig.WorldUnitType.Biomass)
                     {
-                        worldUnitCurrentTotalValue.SetValue(wu, mts.biomass);
+                        worldUnitCurrentTotalValue.SetValue(wu, mts.GetBiomass());
                     }
                     if (wu.GetUnitType() == DataConfig.WorldUnitType.Terraformation)
                     {
-                        worldUnitCurrentTotalValue.SetValue(wu, mts.oxygen + mts.heat + mts.pressure + mts.biomass);
+                        worldUnitCurrentTotalValue.SetValue(wu, mts.GetTi());
                     }
                 }
 
                 // Prevent pinging all unlocks after the join
                 if (firstTerraformSync)
                 {
-                    firstTerraformSync = false;
-                    var go = FindObjectOfType<AlertUnlockables>();
-                    if (go != null)
+                    foreach (var go in FindObjectsByType<AlertUnlockables>(FindObjectsSortMode.None))
                     {
                         AccessTools.Field(typeof(AlertUnlockables), "hasInited").SetValue(go, false);
                     }
@@ -218,12 +231,34 @@ namespace FeatMultiplayer
 
                     //LogInfo("WorldUnitPositioning-Before: " + wup.transform.position);
 
-                    worldUnitsPositioningWorldUnitsHandler.SetValue(wup, wuh);
-                    worldUnitsPositioningHasMadeFirstInit.SetValue(wup, false);
-                    wup.UpdateEvolutionPositioning();
+                    ForceUpdateWorldUnitPositioning(wup, wuh);
 
                     //LogInfo("WorldUnitPositioning-After: " + wup.transform.position);
                 }
+
+                var wuph = Managers.GetManager<WorldUnitPositioningHandler>();
+                List<WorldUnitPositioning> wups = (List<WorldUnitPositioning>)worldUnitsPositioningHandlerAllWorldUnitPositionings.GetValue(wuph);
+                foreach (var wup in wups)
+                {
+                    ForceUpdateWorldUnitPositioning(wup, wuh);
+                }
+
+                var prevTokens = TokensHandler.GetTokensNumber();
+                TokensHandler.SetTotalTokens(mts.tokens);
+                if (prevTokens < mts.tokens && !firstTerraformSync)
+                {
+                    Managers.GetManager<PopupsHandler>().PopupNewTokens(mts.tokens - prevTokens);
+                }
+                TokensHandler.SetAllTimeTokensNumber(mts.tokensAllTime);
+
+                firstTerraformSync = false;
+            }
+
+            static void ForceUpdateWorldUnitPositioning(WorldUnitPositioning wup, WorldUnitsHandler wuh)
+            {
+                worldUnitsPositioningWorldUnitsHandler.SetValue(wup, wuh);
+                worldUnitsPositioningHasMadeFirstInit.SetValue(wup, false);
+                wup.UpdateEvolutionPositioning();
             }
         }
     }

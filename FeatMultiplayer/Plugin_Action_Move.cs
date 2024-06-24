@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -68,26 +69,36 @@ namespace FeatMultiplayer
             for (; ; )
             {
                 var localPosition = GetPlayerMainController().transform.position;
-                var otherPosition = otherPlayer != null ? otherPlayer.rawPosition : localPosition;
 
-                var localInRange = collider.bounds.Contains(localPosition);
-                var otherInRange = collider.bounds.Contains(otherPosition);
-
-                if (!entered && (localInRange || otherInRange))
+                if (collider != null && door1 != null && door2 != null)
                 {
-                    entered = true;
-                    door1.OpenDoor();
-                    door2.OpenDoor();
-                }
-                else
-                if (entered && !localInRange && !otherInRange)
-                {
-                    entered = false;
-                    door1.CloseDoor();
-                    door2.CloseDoor();
+                    var localInRange = collider.bounds.Contains(localPosition);
+                    var otherInRange = false;
+                    foreach (var avatar in playerAvatars)
+                    {
+                        if (collider.bounds.Contains(avatar.Value.rawPosition))
+                        {
+                            otherInRange = true;
+                            break;
+                        }
+                    }
+
+                    if (!entered && (localInRange || otherInRange))
+                    {
+                        entered = true;
+                        door1.OpenDoor();
+                        door2.OpenDoor();
+                    }
+                    else
+                    if (entered && !localInRange && !otherInRange)
+                    {
+                        entered = false;
+                        door1.CloseDoor();
+                        door2.CloseDoor();
+                    }
+
                 }
 
-                
                 yield return null;
             }
         }
@@ -113,20 +124,68 @@ namespace FeatMultiplayer
                 }
                 Transform player = pm.transform;
                 var camera = pm.GetComponentInChildren<PlayerLookable>();
+
+                var localWalkMode = playerWalkModeSnapshot;
+                playerWalkModeSnapshot = 0;
+
+                if (pm.GetPlayerAudio().soundJetPack.isPlaying)
+                {
+                    localWalkMode |= PlayerAvatar.MoveEffect_Jetpacking;
+                }
+
                 MessagePlayerPosition mpp = new MessagePlayerPosition
                 {
                     position = player.position,
                     rotation = camera.m_Camera.transform.rotation,
-                    lightMode = lightMode
+                    lightMode = lightMode,
+                    clientName = "", // not used when sending
+                    miningPosition = playerMiningTarget != null ? playerMiningTarget.transform.position : Vector3.zero,
+                    walkMode = localWalkMode
                 };
-                Send(mpp);
-                Signal();
+
+                if (updateMode == MultiplayerMode.CoopHost)
+                {
+                    SendAllClients(mpp, true);
+                }
+                else
+                {
+                    SendHost(mpp, true);
+                }
             }
         }
 
         static void ReceivePlayerLocation(MessagePlayerPosition mpp)
         {
-            otherPlayer?.SetPosition(mpp.position, mpp.rotation, mpp.lightMode);
+            if (updateMode == MultiplayerMode.CoopHost)
+            {
+                var clientName = mpp.sender.clientName;
+                if (clientName != null)
+                {
+                    if (playerAvatars.TryGetValue(clientName, out var avatar))
+                    {
+                        avatar.UpdateState(mpp.position, mpp.rotation, mpp.lightMode, mpp.miningPosition, mpp.walkMode);
+
+                        mpp.clientName = clientName;
+
+                        SendAllClientsExcept(mpp.sender.id, mpp, true);
+                    }
+                }
+            }
+            if (updateMode == MultiplayerMode.CoopClient)
+            {
+                if (playerAvatars.TryGetValue(mpp.clientName, out var avatar))
+                {
+                    avatar.UpdateState(mpp.position, mpp.rotation, mpp.lightMode, mpp.miningPosition, mpp.walkMode);
+                }
+            }
+
+            if (updateMode == MultiplayerMode.CoopHost)
+            {
+                if (mpp.sender.shadowBackpack != null)
+                {
+                    StorePlayerPosition(mpp.sender.clientName, mpp.sender.shadowBackpackWorldObjectId, mpp.position);
+                }
+            }
         }
 
         /// <summary>
@@ -165,15 +224,24 @@ namespace FeatMultiplayer
             bool otherEntered = false;
             for (; ; )
             {
-                if (updateMode == MultiplayerMode.CoopHost && otherPlayer != null)
+                if (updateMode == MultiplayerMode.CoopHost && playerAvatars.Count != 0)
                 {
                     string name = ___sector.gameObject.name;
-                    if (___collider.bounds.Contains(otherPlayer.rawPosition))
+                    bool found = false;
+                    foreach (var avatar in playerAvatars)
+                    {
+                        if (___collider.bounds.Contains(avatar.Value.rawPosition))
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (found)
                     {
                         if (!otherEntered)
                         {
                             otherEntered = true;
-                            LogInfo("SectorEnter_TrackOtherPlayer: other player entered " + name);
+                            LogInfo("SectorEnter_TrackOtherPlayer: any other player entered " + name);
                         }
                         Scene scene = SceneManager.GetSceneByName(name);
                         if (!scene.IsValid())
@@ -189,7 +257,7 @@ namespace FeatMultiplayer
                         if (otherEntered)
                         {
                             otherEntered = false;
-                            LogInfo("SectorEnter_TrackOtherPlayer: other player exited " + name);
+                            LogInfo("SectorEnter_TrackOtherPlayer: all other players exited " + name);
                         }
                     }
 
@@ -250,5 +318,90 @@ namespace FeatMultiplayer
             LogInfo("Sector_UnloadSector " + __instance.gameObject.name + ", Decoys = " + ___decoyGameObjects.Count);
         }
         */
+
+        public void ReceiveMessageMovePlayer(MessageMovePlayer mmp)
+        {
+            if (updateMode == MultiplayerMode.CoopClient)
+            {
+                LogInfo("Moved by host to " + mmp.position);
+                PlayerMainController pm = GetPlayerMainController();
+                pm.SetPlayerPlacement(mmp.position, pm.transform.rotation);
+            }
+        }
+
+        internal static float playerAudioSoundLoopTimeSteps;
+        internal static AudioResourcesHandler playerAudioAudioResourcesHandler;
+        internal static int playerWalkModeSnapshot;
+
+        /// <summary>
+        /// Vanilla initializes the player audio handler.
+        /// 
+        /// We need the references to the resources it uses. Not expected to change
+        /// during runtime.
+        /// </summary>
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(PlayerAudio), "Start")]
+        static void PlayerAudio_Start(float ___soundLoopTimeSteps, AudioResourcesHandler ___audioResourcesHandler)
+        {
+            playerAudioSoundLoopTimeSteps = ___soundLoopTimeSteps;
+            playerAudioAudioResourcesHandler = ___audioResourcesHandler;
+        }
+
+        /// <summary>
+        /// Vanilla plays one of the clips of the given array.
+        /// 
+        /// We figure out which set it was, then record it so clients can sync their audio effect.
+        /// </summary>
+        /// <param name="_stepsArray"></param>
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(PlayerAudio), "PlayRandomStep")]
+        static void PlayerAudio_PlayRandomStep(List<AudioClip> _stepsArray, bool ___isRunning, bool ___isUnderWater)
+        {
+            playerWalkModeSnapshot = 0;
+            if (playerAudioAudioResourcesHandler != null)
+            {
+                if (_stepsArray == playerAudioAudioResourcesHandler.walkOnSand)
+                {
+                    playerWalkModeSnapshot = 1;
+                }
+                else if (_stepsArray == playerAudioAudioResourcesHandler.walkOnMetal)
+                {
+                    playerWalkModeSnapshot = 2;
+                }
+                else if (_stepsArray == playerAudioAudioResourcesHandler.walkOnWood)
+                {
+                    playerWalkModeSnapshot = 3;
+                }
+                else if (_stepsArray == playerAudioAudioResourcesHandler.walkOnWater)
+                {
+                    playerWalkModeSnapshot = 4;
+                }
+                else if (_stepsArray == playerAudioAudioResourcesHandler.swimming)
+                {
+                    playerWalkModeSnapshot = 5;
+                }
+
+                if (___isRunning)
+                {
+                    playerWalkModeSnapshot |= PlayerAvatar.MoveEffect_Running;
+                }
+                if (___isUnderWater)
+                {
+                    playerWalkModeSnapshot |= PlayerAvatar.MoveEffect_Swimming;
+                }
+            }
+        }
+
+        /// <summary>
+        /// The vanilla plays the fall damage sound.
+        /// 
+        /// We send it to the others as part of the walk mode sync
+        /// </summary>
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(PlayerAudio), nameof(PlayerAudio.PlayFallDamage))]
+        static void PlayerAudio_PlayFallDamage()
+        {
+            playerWalkModeSnapshot |= PlayerAvatar.MoveEffect_FallDamage;
+        }
     }
 }

@@ -1,6 +1,5 @@
 ﻿using BepInEx;
 using HarmonyLib;
-using MijuTools;
 using SpaceCraft;
 using System;
 using System.Collections;
@@ -9,6 +8,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -93,13 +93,28 @@ namespace FeatMultiplayer
             bool ___canRecolt,
             GameObject ___grownThingsContainer,
             bool ___alignWithNormal,
-            float ___growSize
+            float ___growSize,
+            GameObject ___spawnOnThis,
+            float ___downValue,
+            int ___canGrabAtXPercent,
+            MachineOutsideGrowerSpecificRadius ___machineOutsideGrowerSpecificRadius,
+            Inventory ___inventory
         )
         {
             if (updateMode == MultiplayerMode.CoopHost)
             {
-                int layerMask = ~LayerMask.GetMask(GameConfig.layerSectorName, GameConfig.layerIgnoreRaycast);
-                Vector2 randomPointInRadius = UnityEngine.Random.insideUnitCircle * ___radius;
+                int layerMask = ~LayerMask.GetMask(GameConfig.commonIgnoredLayers);
+                
+                float radiusForObject = ___radius;
+                if (___machineOutsideGrowerSpecificRadius != null)
+                {
+                    int num2 = __instance.thingsToGrow.IndexOf(_objectToInstantiate);
+                    if (___machineOutsideGrowerSpecificRadius.GetRadiusForObject(num2) != 0f)
+                    {
+                        radiusForObject = ___machineOutsideGrowerSpecificRadius.GetRadiusForObject(num2);
+                    }
+                }
+                Vector2 randomPointInRadius = UnityEngine.Random.insideUnitCircle * radiusForObject;
 
                 var go = __instance.gameObject;
                 Vector3 relativeToGrower = new Vector3(
@@ -121,12 +136,17 @@ namespace FeatMultiplayer
                     {
                         validLocation = true;
                     }
+                    if (___spawnOnThis != null && raycastHit.collider.gameObject == ___spawnOnThis)
+                    {
+                        validLocation = true;
+                    }
                     if (!validLocation)
                     {
                         return false;
                     }
 
-                    GameObject spawn = UnityEngine.Object.Instantiate<GameObject>(_objectToInstantiate, ___grownThingsContainer.transform);
+                    GameObject spawn = Instantiate<GameObject>(_objectToInstantiate, ___grownThingsContainer.transform);
+                    spawn.transform.position = raycastHit.point;
                     if (!___canRecolt)
                     {
                         GameObjects.RemoveCollidersOnChildren(spawn, false);
@@ -138,8 +158,8 @@ namespace FeatMultiplayer
                     spi.typeIndex = __instance.thingsToGrow.IndexOf(_objectToInstantiate);
                     spi.machineId = ___worldObjectGrower.GetId();
 
-                    float yFightingCorrection = 0.1f;
-                    spawn.transform.position = new Vector3(raycastHit.point.x, raycastHit.point.y - yFightingCorrection, raycastHit.point.z);
+                    var spawnPosition = spawn.transform.position;
+                    spawn.transform.position = new Vector3(spawnPosition.x, spawnPosition.y - ___downValue, spawnPosition.z);
 
                     float z = UnityEngine.Random.value * 360f;
                     Quaternion lhs = Quaternion.Euler(0f, 0f, z);
@@ -153,29 +173,46 @@ namespace FeatMultiplayer
                     }
                     spawn.transform.localScale = new Vector3(spawnScaling, spawnScaling, spawnScaling);
 
+                    var woa = spawn.GetComponent<WorldObjectAssociated>();
+                    if (woa != null)
+                    {
+                        var woSpawn = woa.GetWorldObject();
+                        if (woSpawn != null)
+                        {
+                            woSpawn.SetPositionAndRotation(spawn.transform.position, Quaternion.identity);
+                            //SendWorldObjectToClients(woSpawn, false);
+                        }
+                    }
+
                     var ag = spawn.GetComponent<ActionGrabable>();
                     if (ag != null)
                     {
+                        ag.SetCanGrab(___canGrabAtXPercent <= 100 * spawnScaling / ___growSize);
+
                         spi.doRespawn = () =>
                         {
+                            if (!__instance.gameObject.activeInHierarchy)
+                            {
+                                return;
+                            }
                             ___instantiatedGameObjects.Remove(spawn);
+                            if (___inventory == null || ___inventory.GetInsideWorldObjects().Count != 0)
+                            {
 
-                            machineOutsideGrowerInstantiateAtRandomPosition.Invoke(__instance, new object[] { _objectToInstantiate, false });
+                                machineOutsideGrowerInstantiateAtRandomPosition.Invoke(__instance, new object[] { _objectToInstantiate, false });
 
-                            __instance.StopAllCoroutines();
-                            var enumer = (IEnumerator)machineOutsideGrowerUpdateGrowing.Invoke(__instance, new object[] { __instance.updateInterval });
-                            __instance.StartCoroutine(enumer);
+                                __instance.StopAllCoroutines();
+                                var enumer = (IEnumerator)machineOutsideGrowerUpdateGrowing.Invoke(__instance, new object[] { __instance.updateInterval });
+                                __instance.StartCoroutine(enumer);
+                            }
                         };
 
-                        ag.grabedEvent = (Grabed)Delegate.Combine(
-                            new Grabed(wo => OnGrabSpawn(spi.machineId, id, spi.doRespawn)),
-                            ag.grabedEvent
-                        );
+                        ag.grabedEvent = new Grabed((wo, notif) => OnGrabSpawn(spi.machineId, id, spi.doRespawn));
                     }
                     ___instantiatedGameObjects.Add(spawn);
 
-                    LogInfo("MachineOutsideGrower: Spawn new " + spi.machineId + ", " + id);
-                    Send(new MessageGrowAdd()
+                    LogInfo("MachineOutsideGrower: Spawn new " + spi.machineId + ", " + id/* + "\n" + Environment.StackTrace*/);
+                    SendAllClients(new MessageGrowAdd()
                     {
                         machineId = spi.machineId,
                         spawnId = id,
@@ -184,8 +221,7 @@ namespace FeatMultiplayer
                         growSize = ___growSize,
                         position = spawn.transform.position,
                         rotation = spawn.transform.rotation,
-                    });
-                    Signal();
+                    }, true);
                 }
 
                 return false;
@@ -195,12 +231,11 @@ namespace FeatMultiplayer
 
         static void OnGrabSpawn(int machineId, int spawnId, Action respawn)
         {
-            Send(new MessageGrowRemove()
+            SendAllClients(new MessageGrowRemove()
             {
                 machineId = machineId,
                 spawnId = spawnId,
-            });
-            Signal();
+            }, true);
             respawn();
         }
 
@@ -228,19 +263,21 @@ namespace FeatMultiplayer
             bool ___hasEnergy,
             WorldObject ___worldObjectGrower,
             float ___growSize,
-            float ___growSpeed
+            float ___growSpeed,
+            int ___canGrabAtXPercent
         )
         {
             if (updateMode == MultiplayerMode.CoopHost)
             {
-                if (___instantiatedGameObjects != null && ___instantiatedGameObjects.Count > 0)
+                if (___instantiatedGameObjects != null && ___instantiatedGameObjects.Count > 0 && ___hasEnergy)
                 {
                     bool allFullGrown = true;
                     foreach (GameObject spawn in ___instantiatedGameObjects)
                     {
                         if (spawn != null)
                         {
-                            if (spawn.transform.localScale.x <= ___growSize && ___hasEnergy)
+                            float growScale = spawn.transform.localScale.x;
+                            if (growScale <= ___growSize)
                             {
                                 float num = ___growSpeed * UnityEngine.Random.Range(0f, 1f);
                                 spawn.transform.localScale += new Vector3(num, num, num);
@@ -251,10 +288,17 @@ namespace FeatMultiplayer
                                     tree.UpdateConditions();
                                 }
                             }
+                            var growthPercent = 100 * growScale / ___growSize;
+                            ___worldObjectGrower.SetGrowth(growthPercent);
+                            var ag = spawn.GetComponent<ActionGrabable>();
+                            if (ag != null)
+                            {
+                                ag.SetCanGrab(___canGrabAtXPercent <= growthPercent);
+                            }
 
                             var spi = spawn.GetComponent<OutsideGrowerSpawnInfo>();
 
-                            Send(new MessageGrowAdd()
+                            SendAllClients(new MessageGrowAdd()
                             {
                                 machineId = ___worldObjectGrower.GetId(),
                                 spawnId = spi.spawnId,
@@ -264,26 +308,20 @@ namespace FeatMultiplayer
                                 position = spawn.transform.position,
                                 rotation = spawn.transform.rotation
                             });
+                            /*
+                            LogInfo("MachineOutsideGrower_Grow: " + ___worldObjectGrower.GetId() 
+                                + ", " + spi.spawnId 
+                                + ", " + growthPercent
+                                + ", " + spawn.transform.position); 
+                            */
                         }
                     }
-                    Signal();
+                    SignalAllClients();
                     if (allFullGrown)
                     {
                         ___worldObjectGrower.SetGrowth(100f);
                         // keep sending growth messages
                         //__instance.StopAllCoroutines();
-                    }
-                    else
-                    {
-                        foreach (GameObject gameObject2 in ___instantiatedGameObjects)
-                        {
-                            if (!(gameObject2 == null))
-                            {
-                                int num2 = Mathf.RoundToInt(Mathf.InverseLerp(0f, ___growSize, gameObject2.transform.localScale.x) * 100f);
-                                ___worldObjectGrower.SetGrowth((float)num2);
-                                break;
-                            }
-                        }
                     }
                 }
                 return false;
@@ -306,18 +344,51 @@ namespace FeatMultiplayer
                             var sid = espawn.GetComponent<OutsideGrowerSpawnInfo>();
                             if (sid != null && sid.spawnId == mga.spawnId)
                             {
+                                /*
+                                LogInfo("ReceiveMessageGrowAdd: " + mga.machineId
+                                    + ", " + mga.spawnId
+                                    + ", " + (mga.growth * 100 / mga.growSize)
+                                    + ", " + espawn.transform.position
+                                    + ", " + espawn.gameObject.activeSelf
+                                    );
+                                */
                                 espawn.transform.localScale = new Vector3(mga.growth, mga.growth, mga.growth);
                                 foreach (VegetationTree tree in espawn.GetComponentsInChildren<VegetationTree>())
                                 {
                                     tree.UpdateConditions();
+                                }
+                                var ag0 = espawn.GetComponent<ActionGrabable>();
+                                if (ag0 != null)
+                                {
+                                    ag0.SetCanGrab(mog.canGrabAtXPercent <= 100 * mga.growth / mga.growSize);
                                 }
                                 return;
                             }
                         }
 
                         var spawn = Instantiate(mog.thingsToGrow[mga.typeIndex], mog.grownThingsContainer.transform);
+                        // detach the game object from the world object
+                        var woa = spawn.GetComponent<WorldObjectAssociated>();
+                        if (woa != null)
+                        {
+                            var wog = woa.GetWorldObject();
+                            if (wog != null)
+                            {
+                                wog.SetGameObject(null);
+                            }
+                        }
+
                         spawn.transform.position = mga.position;
                         spawn.transform.rotation = mga.rotation;
+
+                        /*
+                        LogInfo("ReceiveMessageGrowAdd: " + mga.machineId
+                            + ", new " + mga.spawnId
+                            + ", " + (mga.growth * 100 / mga.growSize)
+                            + ", " + spawn.transform.position
+                            + ", " + mga.position
+                            );
+                        */
 
                         if (!mog.canRecolt)
                         {
@@ -331,6 +402,14 @@ namespace FeatMultiplayer
                         spi.spawnId = mga.spawnId;
                         spi.typeIndex = mga.typeIndex;
                         spi.machineId = mga.machineId;
+
+                        var ag = spawn.GetComponent<ActionGrabable>();
+                        if (ag != null)
+                        {
+                            ag.SetCanGrab(mog.canGrabAtXPercent <= mga.growth * 100 / mga.growSize);
+                        }
+
+                        
                     }
                     else
                     {
@@ -371,18 +450,24 @@ namespace FeatMultiplayer
                                     if (woa != null)
                                     {
                                         WorldObject woSpawn = woa.GetWorldObject();
-                                        LogWarning("ReceiveMessageGrowRemove: Grabbing: " + mgr.machineId + " -> "
+                                        woSpawn.ResetPositionAndRotation();
+                                        LogInfo("ReceiveMessageGrowRemove: Grabbing: " + mgr.machineId + " -> "
                                             + mgr.spawnId + " -> " + DebugWorldObject(woSpawn));
 
-                                        SendWorldObject(woSpawn, false);
-                                        Inventory inv = InventoriesHandler.GetInventoryById(shadowInventoryId);
+                                        SendWorldObjectToClients(woSpawn, false);
+                                        Inventory inv = mgr.sender.shadowBackpack;
                                         if (inv.AddItem(woSpawn))
                                         {
                                             woSpawn.SetDontSaveMe(false);
-                                            Send(mgr);
-                                            Signal();
+                                            mgr.sender.Send(mgr);
+                                            mgr.sender.Signal();
 
                                             sid.doRespawn?.Invoke();
+                                            var ag = sid.GetComponent<ActionGrabable>();
+                                            if (ag != null)
+                                            {
+                                                ag.grabedEvent = null; // prevent duplicate spawns because of ActionGrabable::OnDestroy
+                                            }
                                             Destroy(spawn.gameObject);
                                         }
                                         else
@@ -394,7 +479,7 @@ namespace FeatMultiplayer
                                 }
                                 else
                                 {
-                                    LogWarning("ReceiveMessageGrowRemove: Removing: " + mgr.machineId + " -> " + mgr.spawnId);
+                                    LogInfo("ReceiveMessageGrowRemove: Removing: " + mgr.machineId + " -> " + mgr.spawnId);
                                     Destroy(spawn.gameObject);
                                 }
                                 return;

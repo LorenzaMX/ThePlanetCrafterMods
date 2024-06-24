@@ -8,6 +8,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.UI;
 
 namespace FeatMultiplayer
 {
@@ -17,6 +19,9 @@ namespace FeatMultiplayer
         static ConfigEntry<int> networkFrequency;
         static ConfigEntry<int> fullSyncDelay;
         static ConfigEntry<int> smallSyncDelay;
+        static ConfigEntry<bool> streamerMode;
+        static ConfigEntry<int> networkTelemetry;
+        static ConfigEntry<bool> achievements;
 
         static ConfigEntry<bool> hostMode;
         static ConfigEntry<bool> useUPnP;
@@ -25,6 +30,8 @@ namespace FeatMultiplayer
         static ConfigEntry<string> hostAcceptPassword;
         static ConfigEntry<string> hostColor;
         static ConfigEntry<int> hostLogLevel;
+        static ConfigEntry<int> maxClients;
+        static ConfigEntry<string> hostDisplayName;
 
         // client side properties
         static ConfigEntry<string> hostAddress;
@@ -33,8 +40,18 @@ namespace FeatMultiplayer
         static ConfigEntry<string> clientColor;
         static ConfigEntry<int> clientLogLevel;
 
+
         static ConfigEntry<int> fontSize;
         static ConfigEntry<bool> slowdownConsumption;
+        internal static ConfigEntry<int> playerNameFontSize;
+        static ConfigEntry<string> emoteKey;
+
+        internal static ConfigEntry<bool> enableJetpackSound;
+
+        static InputAction emoteAction;
+
+        static ConfigEntry<string> playerLocatorKey;
+        static InputAction playerLocatorAction;
 
         internal static Texture2D astronautFront;
         internal static Texture2D astronautBack;
@@ -42,7 +59,11 @@ namespace FeatMultiplayer
         internal static Texture2D astronautFrontHost;
         internal static Texture2D astronautBackHost;
 
+        internal static readonly Dictionary<string, List<Sprite>> emoteSprites = new();
+
         static readonly object logLock = new object();
+
+        internal static string resourcesPath;
 
         private void Awake()
         {
@@ -56,7 +77,12 @@ namespace FeatMultiplayer
             networkFrequency = Config.Bind("General", "Frequency", 20, "The frequency of checking the network for messages.");
             fullSyncDelay = Config.Bind("General", "SyncDelay", 3000, "Delay between full sync from the host to the client, in milliseconds");
             smallSyncDelay = Config.Bind("General", "SyncDelaySmall", 500, "Delay between small sync from the host to the client, in milliseconds");
-            slowdownConsumption = Config.Bind("General", "SlowdownConsumption", true, "Slows down health/food/water consumption rate");
+            slowdownConsumption = Config.Bind("General", "SlowdownConsumption", false, "Slows down health/food/water consumption rate");
+            playerNameFontSize = Config.Bind("General", "PlayerNameFontSize", 20, "Font size used to display the player's names above their avatar.");
+            emoteKey = Config.Bind("General", "EmoteKey", "G", "The key to bring up the emote wheel.");
+            playerLocatorKey = Config.Bind("General", "PlayerLocatorKey", "H", "Toggle the overlay that shows the other players' location");
+            networkTelemetry = Config.Bind("General", "NetworkTelemetry", 0, "Time in seconds to take a network telemetry snapshot. 0 means disabled.");
+            achievements = Config.Bind("General", "Achievements", false, "Enable obtaining achievements during multiplayer (prevents surprises when joining an advanced world).");
 
             hostMode = Config.Bind("Host", "Host", false, "If true, loading a save will also host it as a multiplayer game.");
             useUPnP = Config.Bind("Host", "UseUPnP", false, "If behind NAT, use UPnP to manually map the HostPort to the external IP address?");
@@ -65,21 +91,27 @@ namespace FeatMultiplayer
             hostColor = Config.Bind("Host", "Color", "1,1,1,1", "The color of the host avatar as comma-separated RGBA floats");
             hostServiceAddress = Config.Bind("Host", "ServiceAddress", "default", "The local IP address the host would listen, '' for auto address, 'default' for first IPv4 local address, 'defaultv6' for first IPv6 local address");
             hostLogLevel = Config.Bind("Host", "LogLevel", 2, "0 - debug+, 1 - info+, 2 - warning+, 3 - error");
+            maxClients = Config.Bind("Host", "MaxClients", 4, "Number of clients that can join at a time");
+            hostDisplayName = Config.Bind("Host", "DisplayName", "", "The name to display for the clients. If empty, <Host> is displayed");
 
             hostAddress = Config.Bind("Client", "HostAddress", "", "The IP address where the Host can be located from the client.");
-            clientName = Config.Bind("Client", "Name", "Buddy", "The name show to the host when a client joins.");
-            clientPassword = Config.Bind("Client", "Password", "password", "The plaintext(!) password presented to the host when joining their game.");
+            clientName = Config.Bind("Client", "Name", "Buddy,Dude", "The list of client names to join with.");
+            clientPassword = Config.Bind("Client", "Password", "password,wordpass", "The plaintext(!) password presented to the host when joining their game.");
             clientColor = Config.Bind("Client", "Color", "0.75,0.75,1,1", "The color of the client avatar as comma-separated RGBA floats");
             clientLogLevel = Config.Bind("Client", "LogLevel", 2, "0 - debug+, 1 - info+, 2 - warning+, 3 - error");
 
+            streamerMode = Config.Bind("General", "StreamerMode", false, "Hides the IP addresses in the main menu.");
+            enableJetpackSound = Config.Bind("General", "JetpackSound", true, "Enables the jetpack sounds of the other players.");
+
             Assembly me = Assembly.GetExecutingAssembly();
-            string dir = Path.GetDirectoryName(me.Location);
+            resourcesPath = Path.GetDirectoryName(me.Location);
+            theLogger.LogInfo("Resource Dir: " + resourcesPath + "/" + OfDir());
 
-            astronautFront = LoadPNG(Path.Combine(dir, "Astronaut_Front.png"));
-            astronautBack = LoadPNG(Path.Combine(dir, "Astronaut_Back.png"));
+            astronautFront = LoadPNG(Path.Combine(resourcesPath, "Astronaut_Front.png"));
+            astronautBack = LoadPNG(Path.Combine(resourcesPath, "Astronaut_Back.png"));
 
-            astronautFrontHost = LoadPNG(Path.Combine(dir, "Astronaut_Front_Host.png"));
-            astronautBackHost = LoadPNG(Path.Combine(dir, "Astronaut_Back_Host.png"));
+            astronautFrontHost = LoadPNG(Path.Combine(resourcesPath, "Astronaut_Front_Host.png"));
+            astronautBackHost = LoadPNG(Path.Combine(resourcesPath, "Astronaut_Back_Host.png"));
 
             InitReflectiveAccessors();
             
@@ -87,7 +119,25 @@ namespace FeatMultiplayer
 
             ApiSetup();
 
-            Harmony.CreateAndPatchAll(typeof(Plugin));
+            EmoteSetup();
+
+            OverlaySetup();
+
+            NetworkTelemetrySetup(this);
+
+            LibCommon.CraftHelper.Init(theLogger);
+
+            var harmony = Harmony.CreateAndPatchAll(typeof(Plugin));
+            LibCommon.SaveModInfo.Patch(harmony);
+            LibCommon.GameVersionCheck.Patch(harmony, "(Feat) Multiplayer - v" + PluginInfo.PLUGIN_VERSION);
+
+            theLogger.LogInfo("Game version is " + Application.version);
+            theLogger.LogInfo("Achievements are " + (achievements.Value ? "enabled" : "disabled"));
+        }
+
+        void OnDestroy()
+        {
+            theLogger.LogInfo("OnDestroy");
         }
 
         static Texture2D LoadPNG(string filename)
@@ -109,10 +159,42 @@ namespace FeatMultiplayer
         static FieldInfo machineGrowerIfLinkedGroupHasEnergy;
         static FieldInfo machineGrowerIfLinkedGroupWorldObject;
         static MethodInfo machineGrowerIfLinkedGroupSetInteractiveStatus;
+        static FieldInfo uiWindowGroupSelectorWorldObject;
+        static FieldInfo worldUnitsPositioningHandlerAllWorldUnitPositionings;
+        /// <summary>
+        /// PlayerEquipment.hasCleanConstructionChip
+        /// </summary>
+        static FieldInfo playerEquipmentHasCleanConstructionChip;
+        /// <summary>
+        /// PlayerEquipment.hasCompassChip
+        /// </summary>
+        static FieldInfo playerEquipmentHasCompassChip;
+        /// <summary>
+        /// PlayerEquipment.hasMapChip
+        /// </summary>
+        static FieldInfo playerEquipmentHasMapChip;
+
+        static FieldInfo meteoHandlerMeteoEvents;
+
+        static FieldInfo playerEquipmentHasDeconstructT2;
+
+        static MethodInfo droneSetClosestAvailableDroneStation;
+
+        static AccessTools.FieldRef<UiWindowContainer, Inventory> uiWindowContainerRightInventory;
+        static AccessTools.FieldRef<Inventory, InventoryDisplayer> inventoryDisplayer;
+        static MethodInfo logisticSelectorSetListsDisplay;
+        static AccessTools.FieldRef<PlayerLarvaeAround, int> playerLarvaeAroundNoLarvaeZoneEntered;
+
+        static MethodInfo uiWindowLogisticsSetLogisticsList;
+
+        static MethodInfo machineTradePlatformUpdateGrowth;
+        static MethodInfo uiWindowTradeUpdateTokenUi;
+
+        static AccessTools.FieldRef<UiGroupLine, Group> uiGroupLineGroup;
+        static AccessTools.FieldRef<UiWindowTrade, MachineTradePlatform> uiWindowTradeMachineTradePlatform;
 
         static void InitReflectiveAccessors()
         {
-            gameObjectByWorldObject = (Dictionary<WorldObject, GameObject>)(AccessTools.Field(typeof(WorldObjectsHandler), "worldObjects").GetValue(null));
             worldUnitCurrentTotalValue = AccessTools.Field(typeof(WorldUnit), "currentTotalValue");
             worldUnitsPositioningWorldUnitsHandler = AccessTools.Field(typeof(WorldUnitPositioning), "worldUnitsHandler");
             worldUnitsPositioningHasMadeFirstInit = AccessTools.Field(typeof(WorldUnitPositioning), "hasMadeFirstInit");
@@ -137,7 +219,41 @@ namespace FeatMultiplayer
 
                 var getMultiplayerModeField = AccessTools.Field(pi.Instance.GetType(), "getMultiplayerMode");
                 getMultiplayerModeField.SetValue(pi.Instance, new Func<string>(GetMultiplayerMode));
+
+                MethodInfo mi1 = AccessTools.Method(pi.Instance.GetType(), "IsFullStacked", new Type[] { typeof(Inventory), typeof(string) });
+                isFullStacked = AccessTools.MethodDelegate<Func<Inventory, string, bool>>(mi1, null);
             }
+
+            uiWindowGroupSelectorWorldObject = AccessTools.Field(typeof(UiWindowGroupSelector), "worldObject");
+
+            playerEquipmentHasCleanConstructionChip = AccessTools.Field(typeof(PlayerEquipment), "hasCleanConstructionChip");
+            playerEquipmentHasCompassChip = AccessTools.Field(typeof(PlayerEquipment), "hasCompassChip");
+            playerEquipmentHasMapChip = AccessTools.Field(typeof(PlayerEquipment), "hasMapChip");
+
+            worldUnitsPositioningHandlerAllWorldUnitPositionings = AccessTools.Field(typeof(WorldUnitPositioningHandler), "allWorldUnitPositionings");
+
+            meteoHandlerMeteoEvents = AccessTools.Field(typeof(MeteoHandler), "meteoEvents");
+
+            playerEquipmentHasDeconstructT2 = AccessTools.Field(typeof(PlayerEquipment), "hasDeconstructT2");
+
+            droneSetClosestAvailableDroneStation = AccessTools.Method(typeof(Drone), "SetClosestAvailableDroneStation");
+
+            uiWindowContainerRightInventory = AccessTools.FieldRefAccess<UiWindowContainer, Inventory>("inventoryRight");
+
+            inventoryDisplayer = AccessTools.FieldRefAccess<Inventory, InventoryDisplayer>("inventoryDisplayer");
+            logisticSelectorSetListsDisplay = AccessTools.Method(typeof(LogisticSelector), "SetListsDisplay");
+
+            playerLarvaeAroundNoLarvaeZoneEntered = AccessTools.FieldRefAccess<PlayerLarvaeAround, int>("noLarvaeZoneEntered");
+
+            uiWindowLogisticsSetLogisticsList = AccessTools.Method(typeof(UiWindowLogistics), "SetLogisticsList", new Type[] { typeof(bool), typeof(GridLayoutGroup), typeof(List<Inventory>) });
+
+            machineTradePlatformUpdateGrowth = AccessTools.Method(typeof(MachineTradePlatform), "UpdateGrowth", new Type[] { typeof(float) });
+
+            uiWindowTradeUpdateTokenUi = AccessTools.Method(typeof(UiWindowTrade), "UpdateTokenUi");
+
+            uiGroupLineGroup = AccessTools.FieldRefAccess<UiGroupLine, Group>("group");
+
+            uiWindowTradeMachineTradePlatform = AccessTools.FieldRefAccess<UiWindowTrade, MachineTradePlatform>("machineTradePlatform");
         }
 
     }

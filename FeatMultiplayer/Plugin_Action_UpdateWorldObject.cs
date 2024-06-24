@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -77,6 +78,10 @@ namespace FeatMultiplayer
             {
                 sb.Append(", growth = ").Append(wo.GetGrowth().ToString(CultureInfo.InvariantCulture));
             }
+            if (wo.GetGameObject() != null)
+            {
+                sb.Append(", GameObject");
+            }
             sb.Append(" }");
             return sb.ToString();
         }
@@ -124,23 +129,39 @@ namespace FeatMultiplayer
             }
         }
 
-        static void SendWorldObject(WorldObject worldObject, bool makeGrabable)
+        static void SendWorldObjectToClients(WorldObject worldObject, bool makeGrabable)
+        {
+            SendAllClients(CreateUpdateWorldObject(worldObject, makeGrabable), true);
+        }
+
+        static void SendWorldObjectToHost(WorldObject worldObject, bool makeGrabable)
+        {
+            SendHost(CreateUpdateWorldObject(worldObject, makeGrabable), true);
+        }
+
+        static void SendWorldObjectTo(WorldObject worldObject, bool makeGrabable, ClientConnection cc)
+        {
+            cc.Send(CreateUpdateWorldObject(worldObject, makeGrabable));
+            cc.Signal();
+        }
+
+        static string CreateUpdateWorldObject(WorldObject worldObject, bool makeGrabable)
         {
             StringBuilder sb = new StringBuilder();
             sb.Append("UpdateWorldObject|");
             MessageWorldObject.AppendWorldObject(sb, '|', worldObject, makeGrabable);
-
-            LogInfo("Sending> " + sb.ToString());
-
-            sb.Append("\r");
-            Send(sb.ToString());
-            Signal();
+            sb.Append('\n');
+            return sb.ToString();
         }
 
         static void ReceiveMessageUpdateWorldObject(MessageUpdateWorldObject mc)
         {
             LogInfo("ReceiveMessageUpdateWorldObject: " + mc.worldObject.id + ", " + mc.worldObject.groupId);
             UpdateWorldObject(mc.worldObject);
+            if (updateMode == MultiplayerMode.CoopHost)
+            {
+                SendAllClientsExcept(mc.sender.id, mc, true);
+            }
         }
 
         static void UpdatePanelsOn(WorldObject wo)
@@ -198,6 +219,50 @@ namespace FeatMultiplayer
             }
         }
 
+        static void ReceiveMessageSetLinkedGroups(MessageSetLinkedGroups mslg)
+        {
+            if (worldObjectById.TryGetValue(mslg.id, out var wo))
+            {
+                if (mslg.groupIds == null || mslg.groupIds.Count == 0)
+                {
+                    wo.SetLinkedGroups(null);
+                }
+                else
+                {
+                    List<Group> groups = new();
+                    foreach (var gid in mslg.groupIds)
+                    {
+                        groups.Add(GroupsHandler.GetGroupViaId(gid));
+                    }
+                    wo.SetLinkedGroups(groups);
+                }
+                var openedUi = Managers.GetManager<WindowsHandler>().GetOpenedUi();
+                if (openedUi == DataConfig.UiType.GroupSelector)
+                {
+                    var window = (UiWindowGroupSelector)Managers.GetManager<WindowsHandler>().GetWindowViaUiId(openedUi);
+                    var windowWo = (WorldObject)uiWindowGroupSelectorWorldObject.GetValue(window);
+                    if (windowWo != null && windowWo.GetId() == mslg.id)
+                    {
+                        window.SetGroupSelectorWorldObject(wo);
+                    }
+                }
+
+                var go = wo.GetGameObject();
+                if (go != null) {
+                    var linkedScreen = go.GetComponentInChildren<ScreenShowLinkedGroup>();
+                    if (linkedScreen != null)
+                    {
+                        linkedScreen.SetGroupSelectedImage(wo);
+                    }
+                }
+
+                if (updateMode == MultiplayerMode.CoopHost)
+                {
+                    SendAllClientsExcept(mslg.sender.id, mslg);
+                }
+            }
+        }
+
         /// <summary>
         /// Fully updates the state of the world object represented by the message.
         /// 
@@ -232,11 +297,13 @@ namespace FeatMultiplayer
             var oldColor = wo.GetColor();
             var oldText = wo.GetText();
             var oldPanelIds = wo.GetPanelsId();
+            var oldIId = wo.GetLinkedInventoryId();
 
             wo.SetPositionAndRotation(mwo.position, mwo.rotation);
             wo.SetColor(mwo.color);
             wo.SetText(mwo.text);
             wo.SetGrowth(mwo.growth);
+            wo.SetSetting(mwo.settings);
 
             wo.SetPanelsId(mwo.panelIds);
             wo.SetDontSaveMe(false);
@@ -257,6 +324,25 @@ namespace FeatMultiplayer
                     LogInfo("UpdateWorldObject:   Creating default inventory " + mwo.inventoryId
                         + " of WorldObject " + DebugWorldObject(wo));
                     InventoriesHandler.CreateNewInventory(1, mwo.inventoryId);
+                }
+
+                if (oldIId != mwo.inventoryId)
+                {
+                    var wh = Managers.GetManager<WindowsHandler>();
+                    if (wh != null && wh.GetOpenedUi() == DataConfig.UiType.Container)
+                    {
+                        var wc = wh.GetWindowViaUiId(DataConfig.UiType.Container) as UiWindowContainer;
+                        if (wc != null)
+                        {
+                            var ri = uiWindowContainerRightInventory(wc);
+                            if (ri != null && ri.GetId() == oldIId)
+                            {
+                                uiWindowContainerRightInventory(wc) = inv;
+                                inv.DisplayIn(wc.containerInventoryContainer, true, true, !WorldObjectsIdHandler.IsWorldObjectFromScene(mwo.id));
+                            }
+                        }
+
+                    }
                 }
             }
             else
@@ -290,6 +376,14 @@ namespace FeatMultiplayer
                 }
                 rocketsInFlight.Remove(mwo.id);
             }
+            if (!doPlace && hasGameObject)
+            {
+                LogInfo("UpdateWorldObject:   WorldObject " + wo.GetId() + " GameObject destroyed: not placed");
+                TryRemoveGameObject(wo);
+                Destroy(go);
+                hasGameObject = false;
+            }
+
             if (hasGameObject)
             {
                 if (doPlace && !dontUpdatePosition)
@@ -298,9 +392,13 @@ namespace FeatMultiplayer
                     {
                         if (!rocketsInFlight.Contains(mwo.id))
                         {
-                            LogInfo("UpdateWorldObject:   Placement " + wo.GetId() + ", " + wo.GetGroup().GetId() + ", position=" + mwo.position + ", rotation=" + mwo.rotation);
-                            go.transform.position = mwo.position;
-                            go.transform.rotation = mwo.rotation;
+                            var drone = go.GetComponent<DroneSmoother>();
+                            if (drone == null || drone.targetReached)
+                            {
+                                LogInfo("UpdateWorldObject:   Placement " + wo.GetId() + ", " + wo.GetGroup().GetId() + ", position=" + mwo.position + ", rotation=" + mwo.rotation);
+                                go.transform.position = mwo.position;
+                                go.transform.rotation = mwo.rotation;
+                            }
                         }
                     }
                 }

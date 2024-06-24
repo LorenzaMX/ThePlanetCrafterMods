@@ -4,9 +4,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessageMined : MessageStringProvider
+    internal class MessageMined : MessageBase
     {
         internal int id;
         internal string groupId;
@@ -31,7 +31,7 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
             return "Mined|" + id + "|" + groupId + "\n";
         }

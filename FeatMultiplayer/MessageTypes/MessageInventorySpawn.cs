@@ -6,13 +6,13 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
     /// <summary>
     /// Sent by the client to ask the host to generate inventory for a pre-placed chest or
     /// other object with <see cref="SpaceCraft.InventoryFromScene"/>.
     /// </summary>
-    internal class MessageInventorySpawn : MessageStringProvider
+    internal class MessageInventorySpawn : MessageBase
     {
         internal int inventoryId;
 
@@ -35,7 +35,7 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
             return "InventorySpawn|" + inventoryId + "\n";
         }

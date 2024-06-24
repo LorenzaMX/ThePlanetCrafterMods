@@ -4,9 +4,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessageSortInventory : MessageStringProvider
+    internal class MessageSortInventory : MessageBase
     {
         internal int inventoryId;
 
@@ -29,7 +29,7 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
             return "SortInventory|" + inventoryId + "\n";
         }

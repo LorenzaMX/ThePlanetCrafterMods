@@ -7,9 +7,9 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 
-namespace FeatMultiplayer
+namespace FeatMultiplayer.MessageTypes
 {
-    internal class MessageGrowAdd : MessageStringProvider
+    internal class MessageGrowAdd : MessageBase
     {
         internal int machineId;
         internal int spawnId;
@@ -26,8 +26,8 @@ namespace FeatMultiplayer
                 try
                 {
                     mga = new();
-                    mga.machineId = int.Parse(parameters[1]);
-                    mga.spawnId = int.Parse(parameters[2]);
+                    mga.machineId = int.Parse(parameters[1], NumberStyles.HexNumber);
+                    mga.spawnId = int.Parse(parameters[2], NumberStyles.HexNumber);
                     mga.typeIndex = int.Parse(parameters[3]);
                     mga.growth = float.Parse(parameters[4], CultureInfo.InvariantCulture);
                     mga.growSize = float.Parse(parameters[5], CultureInfo.InvariantCulture);
@@ -44,14 +44,14 @@ namespace FeatMultiplayer
             return false;
         }
 
-        public string GetString()
+        public override string GetString()
         {
-            return "GrowAdd|" + machineId
-                + "|" + spawnId
+            return "GrowAdd|" + machineId.ToString("X")
+                + "|" + spawnId.ToString("X")
                 + "|" + typeIndex
                 + "|" + growth.ToString(CultureInfo.InvariantCulture)
                 + "|" + growSize.ToString(CultureInfo.InvariantCulture)
-                + "|" + DataTreatments.Vector3ToString(position)
+                + "|" + MessageHelper.Vector3ToStringReducedPrecision(position)
                 + "|" + DataTreatments.QuaternionToString(rotation)
                 + "\n";
         }

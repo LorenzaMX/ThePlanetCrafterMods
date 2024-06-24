@@ -1,6 +1,5 @@
 ﻿using BepInEx;
 using HarmonyLib;
-using MijuTools;
 using SpaceCraft;
 using System;
 using System.Collections.Generic;
@@ -8,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using FeatMultiplayer.MessageTypes;
 
 namespace FeatMultiplayer
 {
@@ -40,43 +40,35 @@ namespace FeatMultiplayer
         {
             if (updateMode == MultiplayerMode.CoopClient)
             {
-                List<Group> recipe = groupItem.GetRecipe().GetIngredientsGroupInRecipe();
-                Inventory inventory = _playerController.GetPlayerBackpack().GetInventory();
-                bool hasAllIngredients = inventory.ContainsItems(recipe);
-                bool freeCraft = Managers.GetManager<PlayModeHandler>().GetFreeCraft();
-
-                if (hasAllIngredients || freeCraft)
+                suppressInventoryChange = true;
+                try
                 {
-                    if ((recipe.Count == 0 || freeCraft) && inventory.IsFull())
+                    __result = LibCommon.CraftHelper.TryCraftInventory(
+                        groupItem,
+                        _playerController.transform.position,
+                        _playerController.GetPlayerBackpack().GetInventory(),
+                        _playerController.GetPlayerEquipment().GetInventory(),
+                        Managers.GetManager<GameSettingsHandler>().GetCurrentGameSettings().GetFreeCraft(),
+                        false,
+                        (inv, gr) => isFullStacked != null ? !isFullStacked(inv, gr.GetId()) : !inv.IsFull(),
+                        null,
+                        null,
+                        null,
+                        true,
+                        false
+                    );
+                    if (__result)
                     {
-                        Managers.GetManager<BaseHudHandler>().DisplayCursorText("UI_InventoryFull", 2f, "");
-                        __result = false;
-                    }
-                    else
-                    {
-                        // Client prediction: the removal will succeed, no need to notify about the removal
-                        suppressInventoryChange = true;
-                        try
-                        {
-                            inventory.RemoveItems(recipe, false, true);
-                        }
-                        finally
-                        {
-                            suppressInventoryChange = false;
-                        }
-
                         _sourceCrafter?.CraftAnimation(groupItem);
                         ___totalCraft++;
-                        __result = true;
 
                         LogInfo("SendMessageCraft: " + groupItem.GetId());
-                        Send(new MessageCraft() { groupId = groupItem.GetId() });
-                        Signal();
+                        SendHost(new MessageCraft() { groupId = groupItem.GetId() }, true);
                     }
                 }
-                else
+                finally
                 {
-                    __result = false;
+                    suppressInventoryChange = false;
                 }
 
                 return false;
@@ -113,7 +105,7 @@ namespace FeatMultiplayer
                 List<Group> recipe = groupItem.GetRecipe().GetIngredientsGroupInRecipe();
                 Inventory inventory = _playerController.GetPlayerBackpack().GetInventory();
                 bool hasAllIngredients = inventory.ContainsItems(recipe);
-                bool freeCraft = Managers.GetManager<PlayModeHandler>().GetFreeCraft();
+                bool freeCraft = Managers.GetManager<GameSettingsHandler>().GetCurrentGameSettings().GetFreeCraft();
 
                 if (hasAllIngredients || freeCraft)
                 {
@@ -134,13 +126,12 @@ namespace FeatMultiplayer
                             suppressInventoryChange = false;
                         }
 
-                        Send(new MessageCraftWorld()
+                        SendHost(new MessageCraftWorld()
                         {
                             groupId = groupItem.GetId(),
                             position = _sourceCrafter.GetSpawnPosition(),
                             craftTime = _sourceCrafter.GetCraftTime()
-                        });
-                        Signal();
+                        }, true);
                     }
                     else
                     {
@@ -152,7 +143,7 @@ namespace FeatMultiplayer
                         go.AddComponent<ShowMeAfterDelay>().SetDelay(_sourceCrafter.GetCraftTime());
 
                         // FIXME this won't animate on the client
-                        SendWorldObject(wo, false);
+                        SendWorldObjectToClients(wo, false);
                     }
                 }
                 else
@@ -169,51 +160,35 @@ namespace FeatMultiplayer
         {
             if (updateMode == MultiplayerMode.CoopHost)
             {
-                Inventory inv = InventoriesHandler.GetInventoryById(shadowInventoryId);
                 GroupItem gri = GroupsHandler.GetGroupViaId(mc.groupId) as GroupItem;
-                var recipe = gri.GetRecipe().GetIngredientsGroupInRecipe();
                 if (gri != null)
                 {
-                    bool hasAllIngredients = inv.ContainsItems(recipe);
-                    bool freeCraft = Managers.GetManager<PlayModeHandler>().GetFreeCraft();
+                    var shadowBackpack = mc.sender.shadowBackpack;
+                    var shadowEquipment = mc.sender.shadowEquipment;
+                    LibCommon.CraftHelper.TryCraftInventory(gri,
+                        playerAvatars[mc.sender.clientName].rawPosition,
+                        shadowBackpack,
+                        shadowEquipment,
+                        Managers.GetManager<GameSettingsHandler>().GetCurrentGameSettings().GetFreeCraft(),
+                        true,
+                        (inv, gr) => isFullStacked != null ? !isFullStacked(inv, gr.GetId()) : !inv.IsFull(),
+                        wo => SendWorldObjectToClients(wo, false),
+                        wo =>
+                        {
+                            shadowEquipment.AddItem(wo);
+                        },
+                        grs =>
+                        {
+                            // Since removing equipment may shrink the backpack/equipment capacity, we need
+                            // increase the size temporarily so such upgrade doesn't spill items.
+                            mc.sender.Send(new MessageEquipmentSwap());
+                            mc.sender.Signal();
 
-                    if (hasAllIngredients || freeCraft)
-                    {
-                        var wo = WorldObjectsHandler.CreateNewWorldObject(gri, 0);
-
-                        suppressInventoryChange = true;
-                        bool added;
-                        try
-                        {
-                            added = inv.AddItem(wo);
-                        } 
-                        finally 
-                        {
-                            suppressInventoryChange = false;
-                        }
-                        if (added)
-                        {
-                            LogInfo("ReceiveMessageCraft: " + mc.groupId + ", success = true");
-                            SendWorldObject(wo, false);
-                            Send(new MessageInventoryAdded()
-                            {
-                                inventoryId = 1,
-                                itemId = wo.GetId(),
-                                groupId = mc.groupId
-                            });
-                            Signal();
-                            inv.RemoveItems(recipe, true, false);
-                        }
-                        else
-                        {
-                            WorldObjectsHandler.DestroyWorldObject(wo);
-                            LogWarning("ReceiveMessageCraft: " + mc.groupId + ", success = false, reason = inventory full");
-                        }
-                    }
-                    else
-                    {
-                        LogWarning("ReceiveMessageCraft: " + mc.groupId + ", success = false, reason = missing ingredients");
-                    }
+                            shadowEquipment.RemoveItems(grs, true, false);
+                        },
+                        false,
+                        true
+                    );
                 } 
                 else
                 {
@@ -226,13 +201,13 @@ namespace FeatMultiplayer
         {
             if (updateMode == MultiplayerMode.CoopHost)
             {
-                Inventory inv = InventoriesHandler.GetInventoryById(shadowInventoryId);
+                Inventory inv = mcw.sender.shadowBackpack;
                 GroupItem gri = GroupsHandler.GetGroupViaId(mcw.groupId) as GroupItem;
                 var recipe = gri.GetRecipe().GetIngredientsGroupInRecipe();
                 if (gri != null)
                 {
                     bool hasAllIngredients = inv.ContainsItems(recipe);
-                    bool freeCraft = Managers.GetManager<PlayModeHandler>().GetFreeCraft();
+                    bool freeCraft = Managers.GetManager<GameSettingsHandler>().GetCurrentGameSettings().GetFreeCraft();
 
                     if (hasAllIngredients || freeCraft)
                     {
@@ -245,7 +220,7 @@ namespace FeatMultiplayer
 
                         LogInfo("ReceiveMessageCraftWorld: " + DebugWorldObject(wo) + ", success = true");
                         // FIXME this won't animate properly on the client
-                        SendWorldObject(wo, false);
+                        SendWorldObjectToClients(wo, false);
                     }
                     else
                     {

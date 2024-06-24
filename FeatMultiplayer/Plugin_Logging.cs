@@ -55,7 +55,14 @@ namespace FeatMultiplayer
                 int logLevel;
                 if (updateMode == MultiplayerMode.CoopClient)
                 {
-                    fileName += "Client.log";
+                    if (clientJoinName != null)
+                    {
+                        fileName += "Client_" + clientJoinName + ".log";
+                    }
+                    else
+                    {
+                        fileName += "Client.log";
+                    }
                     logLevel = clientLogLevel.Value;
                 } else
                 {
@@ -69,6 +76,8 @@ namespace FeatMultiplayer
                         1 => "[Info:    (Feat) Multiplayer @ ",
                         2 => "[Warning: (Feat) Multiplayer @ ",
                         3 => "[Error:   (Feat) Multiplayer @ ",
+                        4 => "[Fatal:   (Feat) Multiplayer @ ",
+                        5 => "[Always:  (Feat) Multiplayer @ ",
                         _ => "[Debug:   (Feat) Multiplayer @ "
                     };
 
@@ -87,7 +96,14 @@ namespace FeatMultiplayer
             string fileName = Application.persistentDataPath + "\\Player_";
             if (updateMode == MultiplayerMode.CoopClient)
             {
-                fileName += "Client.log";
+                if (clientJoinName != null)
+                {
+                    fileName += "Client_" + clientJoinName + ".log";
+                }
+                else
+                {
+                    fileName += "Client.log";
+                }
             }
             else
             {
@@ -114,6 +130,10 @@ namespace FeatMultiplayer
         internal static void LogWarning(object message)
         {
             LogInternal(message, 2);
+        }
+        internal static void LogAlways(object message)
+        {
+            LogInternal(message, 5);
         }
     }
 }
